@@ -175,7 +175,7 @@ if page == "Overzicht":
     st.plotly_chart(fig_season, use_container_width=True)
 
 elif page == "Temperatuur Trends":
-    st.header("🌡️ Temperatuur Trends")
+    st.header("🌡️ Temperatuur Trendss")
     use_cols = [c for c in ["TN_C", "TG_C", "TX_C"] if c in df.columns]
 
     if use_cols:
