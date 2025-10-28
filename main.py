@@ -546,49 +546,47 @@ elif page == "Voorspellingsmodel":
     else:
         agg["score_norm"] = 0.0
 
-    # Kaart
+   # Kaart
+if agg.empty:
+    st.info("Geen geldige waarden om op de kaart te tonen voor de gekozen instellingen.")
+else:
+    # Zorg dat lat/lon numeriek zijn en filter ongeldige rijen
+    agg = agg.copy()
+    for col in ["lat", "lon"]:
+        agg[col] = pd.to_numeric(agg[col], errors="coerce")
+    agg = agg.dropna(subset=["lat", "lon"])
+    agg = agg[(agg["lat"] >= -90) & (agg["lat"] <= 90) & (agg["lon"] >= -180) & (agg["lon"] <= 180)]
+
     if agg.empty or agg["lat"].isna().all():
         st.info("Geen geldige waarden om op de kaart te tonen voor de gekozen instellingen.")
     else:
-        size_vals = (agg["score_norm"] * 24.0) + 6.0  # zichtbare minimale marker
+        # Maak een size-kolom i.p.v. een losse array
+        agg["size"] = (agg["score_norm"].clip(0, 1) * 24.0) + 6.0  # zichtbare minimale marker
+
+        # (optioneel) geometry of andere complexe kolommen droppen uit hover
+        hover_cols = ["station", "score", "TG_C", "RH_mm", "FG_ms", "n_days"]
+        hover_data = {c: True for c in hover_cols if c in agg.columns}
+        # Verberg lat/lon/score_norm in hover (al op de marker zichtbaar via kleur/positie)
+        hover_data.update({"lat": False, "lon": False, "score_norm": False, "size": False})
+
         fig_map_pred = px.scatter_mapbox(
             agg,
-            lat="lat", lon="lon",
+            lat="lat",
+            lon="lon",
             color="score_norm",
-            size=size_vals,
+            size="size",                 # kolomnaam i.p.v. array
             hover_name="station",
-            hover_data={
-                "lat": False, "lon": False,
-                "score_norm": False,
-                "score": True, "TG_C": True, "RH_mm": True, "FG_ms": True, "n_days": True
-            },
+            hover_data=hover_data,
             color_continuous_scale="Viridis",
-            zoom=6, height=540
+            range_color=[0, 1],          # score_norm is 0..1
+            zoom=6,
+            height=540
         )
+
         fig_map_pred.update_layout(
             mapbox_style="open-street-map",
             margin=dict(l=0, r=0, t=10, b=0),
             coloraxis_colorbar=dict(title="Matchscore (0–1)")
         )
+
         st.plotly_chart(fig_map_pred, use_container_width=True)
-
-    # Top-matches tabel
-    st.subheader("🏆 Beste matches")
-    topn = agg.sort_values("score", ascending=False).head(10)
-    topn_display = topn[["station", "score", "TG_C", "RH_mm", "FG_ms", "n_days"]].rename(columns={
-        "station": "Station",
-        "score": "Score (gem.)",
-        "TG_C": "Gem. Temp (°C)",
-        "RH_mm": "Gem. Neerslag (mm)",
-        "FG_ms": "Gem. Wind (m/s)",
-        "n_days": "Aantal dagen (basis)"
-    })
-    st.dataframe(topn_display, use_container_width=True)
-
-    with st.expander("Wat doet dit model?"):
-        st.markdown(
-            "- We gebruiken je gekozen **temperatuur / neerslag / wind** als doelconditie.\n"
-            "- Voor elke historische dag per station berekenen we een **similarity-score** met een Gaussische kernel op basis van jouw toleranties.\n"
-            "- De **stationscore** is het gemiddelde van die dag-scores: hoe hoger, hoe beter dat station historisch bij jouw weer past.\n"
-            "- Dit is geen meteorologische forecast; het is een **data-gedreven match** op basis van het verleden."
-        )
