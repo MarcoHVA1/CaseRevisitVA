@@ -546,47 +546,61 @@ elif page == "Voorspellingsmodel":
     else:
         agg["score_norm"] = 0.0
 
-   # Kaart
+  # Kaart
 if agg.empty:
     st.info("Geen geldige waarden om op de kaart te tonen voor de gekozen instellingen.")
 else:
-    # Zorg dat lat/lon numeriek zijn en filter ongeldige rijen
-    agg = agg.copy()
-    for col in ["lat", "lon"]:
-        agg[col] = pd.to_numeric(agg[col], errors="coerce")
-    agg = agg.dropna(subset=["lat", "lon"])
-    agg = agg[(agg["lat"] >= -90) & (agg["lat"] <= 90) & (agg["lon"] >= -180) & (agg["lon"] <= 180)]
+    try:
+        # --- 1) Schoon & valideer data ---
+        agg = agg.copy()
 
-    if agg.empty or agg["lat"].isna().all():
-        st.info("Geen geldige waarden om op de kaart te tonen voor de gekozen instellingen.")
-    else:
-        # Maak een size-kolom i.p.v. een losse array
-        agg["size"] = (agg["score_norm"].clip(0, 1) * 24.0) + 6.0  # zichtbare minimale marker
+        # Zorg dat lat/lon numeriek en eindig zijn
+        for col in ["lat", "lon"]:
+            agg[col] = pd.to_numeric(agg[col], errors="coerce")
 
-        # (optioneel) geometry of andere complexe kolommen droppen uit hover
-        hover_cols = ["station", "score", "TG_C", "RH_mm", "FG_ms", "n_days"]
-        hover_data = {c: True for c in hover_cols if c in agg.columns}
-        # Verberg lat/lon/score_norm in hover (al op de marker zichtbaar via kleur/positie)
-        hover_data.update({"lat": False, "lon": False, "score_norm": False, "size": False})
+        agg = agg.dropna(subset=["lat", "lon"])
+        agg = agg[(agg["lat"] >= -90) & (agg["lat"] <= 90) & (agg["lon"] >= -180) & (agg["lon"] <= 180)]
 
-        fig_map_pred = px.scatter_mapbox(
-            agg,
-            lat="lat",
-            lon="lon",
-            color="score_norm",
-            size="size",                 # kolomnaam i.p.v. array
-            hover_name="station",
-            hover_data=hover_data,
-            color_continuous_scale="Viridis",
-            range_color=[0, 1],          # score_norm is 0..1
-            zoom=6,
-            height=540
-        )
+        # score_norm numeriek maken en clippen (geen -inf/inf/NaN in kleur)
+        if "score_norm" in agg.columns:
+            agg["score_norm"] = pd.to_numeric(agg["score_norm"], errors="coerce").fillna(0.0).clip(0, 1)
+        else:
+            agg["score_norm"] = 0.0
 
-        fig_map_pred.update_layout(
-            mapbox_style="open-street-map",
-            margin=dict(l=0, r=0, t=10, b=0),
-            coloraxis_colorbar=dict(title="Matchscore (0–1)")
-        )
+        # Size als kolom i.p.v. array; clip op [6, 30] om validator-issues te voorkomen
+        agg["size"] = (agg["score_norm"] * 24.0) + 6.0
+        agg["size"] = pd.to_numeric(agg["size"], errors="coerce").fillna(6.0).clip(6, 30)
 
-        st.plotly_chart(fig_map_pred, use_container_width=True)
+        if agg.empty:
+            st.info("Geen geldige waarden om op de kaart te tonen voor de gekozen instellingen.")
+        else:
+            # --- 2) MINIMALE FIGUUR (robust) ---
+            fig_map_pred = px.scatter_mapbox(
+                agg,
+                lat="lat",
+                lon="lon",
+                color="score_norm",
+                size="size",
+                # let op: GEEN hover_data/hover_name hier – eerst minimaal laten slagen
+                color_continuous_scale="Viridis",
+                range_color=[0, 1],
+                zoom=6,
+                height=540
+            )
+
+            fig_map_pred.update_layout(
+                mapbox_style="open-street-map",
+                margin=dict(l=0, r=0, t=10, b=0),
+                coloraxis_colorbar=dict(title="Matchscore (0–1)")
+            )
+
+            st.plotly_chart(fig_map_pred, use_container_width=True)
+
+            # --- 3) Optioneel: diagnose tonen als je nog problemen vermoedt ---
+            with st.expander("Diagnose (dtypes & head)"):
+                st.write(agg.dtypes)
+                st.dataframe(agg.head())
+
+    except Exception as e:
+        st.error("Kon de kaart niet tekenen. Volledige foutmelding hieronder.")
+        st.exception(e)
