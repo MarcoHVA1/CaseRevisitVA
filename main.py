@@ -415,7 +415,7 @@ elif page == "Windtrends & Topdagen":
 elif page == "Voorspellingsmodel":
     st.header("🧠 Voorspellingsmodel — waar matcht jouw weer het beste?")
     st.caption(
-        "Kies maand, dag, neerslag en windsnelheid. "
+        "Kies gewenste temperatuur, neerslag en windsnelheid. "
         "We berekenen per station een ‘matchscore’ op basis van historische dagen die hierop lijken."
     )
 
@@ -436,22 +436,16 @@ elif page == "Voorspellingsmodel":
         st.warning("Geen JSON-data gevonden (bijv. 'amsterdam_2023_2024.json').")
         st.stop()
 
-    # Periodes & maand/dagfilter UI
+    # Periodes & maandfilter
     all_periods = sorted({p for _, p, _ in found})
     with st.expander("Filters", expanded=True):
         sel_periods = st.multiselect("📅 Kies jaarperiodes:", all_periods, default=all_periods)
-
-        # Maand-selectie (1..12 + 'Alle')
         month_names = [
             "Alle", "01 - Januari", "02 - Februari", "03 - Maart", "04 - April",
             "05 - Mei", "06 - Juni", "07 - Juli", "08 - Augustus",
             "09 - September", "10 - Oktober", "11 - November", "12 - December"
         ]
-        sel_month_label = st.selectbox("📆 Maand:", month_names, index=0)
-
-        # Dag-selectie (1..31 of 'Alle') — pas bereik dynamisch aan nadat data is geladen
-        sel_day_default = "Alle"
-        sel_day = st.selectbox("📅 Dag:", [sel_day_default] + [str(d) for d in range(1, 32)], index=0)
+        sel_month = st.selectbox("📆 Maand:", month_names, index=0)
 
     # Data laden & samenvoegen
     frames = []
@@ -461,20 +455,13 @@ elif page == "Voorspellingsmodel":
         dfp = load_data(path_str)
         if "date" not in dfp.columns:
             continue
-
-        # Numeriek maken wat we gebruiken
-        for c in ["RH_mm", "FG_ms"]:
+        # Numeriek maken
+        for c in ["TG_C", "RH_mm", "FG_ms"]:
             if c in dfp.columns:
                 dfp[c] = pd.to_numeric(dfp[c], errors="coerce")
-
         dfp["station_key"] = station_key
         dfp["station"] = STATIONS_META[station_key]["name"]
         dfp["period"] = period
-
-        # Zorg voor month/day kolommen voor filtering
-        dfp["month"] = dfp["date"].dt.month
-        dfp["day"] = dfp["date"].dt.day
-
         frames.append(dfp)
 
     if not frames:
@@ -484,39 +471,124 @@ elif page == "Voorspellingsmodel":
     df_all = pd.concat(frames, ignore_index=True)
 
     # Maandfilter toepassen
-    if sel_month_label != "Alle":
-        month_idx = month_names.index(sel_month_label)   # 1..12
-        df_all = df_all[df_all["month"] == month_idx]
-
-    # Dagfilter toepassen (alleen als niet 'Alle')
-    if sel_day != "Alle":
-        try:
-            day_idx = int(sel_day)
-            df_all = df_all[df_all["day"] == day_idx]
-        except ValueError:
-            pass  # blijft 'Alle'
-
-    # Als de gebruiker 'Alle' koos maar de data beperkt is, pas de dag-keuze aan
-    # (optioneel: deze diagnose helpt de gebruiker)
-    with st.expander("Beschikbaarheid"):
-        if sel_month_label == "Alle":
-            st.write("Beschikbare maanden in de data:", sorted(df_all["month"].dropna().unique().tolist()))
-        else:
-            st.write("Beschikbare dagen in maand", sel_month_label, ":", sorted(df_all["day"].dropna().unique().tolist()))
+    if sel_month != "Alle":
+        month_idx = month_names.index(sel_month)
+        df_all = df_all[df_all["date"].dt.month == month_idx]
 
     # Benodigde kolommen aanwezig?
-    need_cols = ["station_key", "station", "RH_mm", "FG_ms"]
+    need_cols = ["station_key", "station", "TG_C", "RH_mm", "FG_ms"]
     if not set(need_cols).issubset(df_all.columns):
-        st.error("Benodigde kolommen ontbreken in de data (RH_mm, FG_ms).")
+        st.error("Benodigde kolommen ontbreken in de data (TG_C, RH_mm, FG_ms).")
         st.stop()
 
-    # Sliders voor gewenste omstandigheden (geen temperatuur, geen tolerantie-sliders)
-    col2, col3 = st.columns(2)
+    # Sliders voor gewenste omstandigheden (dynamisch bereik uit data)
+    col1, col2, col3 = st.columns(3)
+    t_min, t_max = float(np.nanmin(df_all["TG_C"])) - 2.0, float(np.nanmax(df_all["TG_C"])) + 2.0
+    r_min, r_max = 0.0, max(0.0, float(np.nanmax(df_all["RH_mm"])) + 2.0)
+    w_min, w_max = 0.0, max(0.0, float(np.nanmax(df_all["FG_ms"])) + 1.0)
 
-    # Dynamisch bereik uit data
-    r_min, r_max = float(np.nanmin(df_all["RH_mm"])), float(np.nanmax(df_all["RH_mm"]))
-    w_min, w_max = float(np.nanmin(df_all["FG_ms"])), float(np.nanmax(df_all["FG_ms"]))
+    with col1:
+        t_target = st.slider(
+            "🌡️ Gewenste temperatuur (°C)",
+            min_value=float(np.floor(t_min)),
+            max_value=float(np.ceil(t_max)),
+            value=float(np.clip(20.0, t_min, t_max)),
+            step=0.5
+        )
+        tol_t = st.slider("Tolerantie ±°C", 0.5, 10.0, 3.0, 0.5)
+    with col2:
+        r_target = st.slider(
+            "🌧️ Gewenste neerslag (mm/dag)",
+            min_value=float(np.floor(r_min)),
+            max_value=float(np.ceil(r_max)),
+            value=float(np.clip(0.0, r_min, r_max)),
+            step=0.5
+        )
+        tol_r = st.slider("Tolerantie ±mm", 0.5, 20.0, 5.0, 0.5)
+    with col3:
+        w_target = st.slider(
+            "💨 Gewenste windsnelheid (m/s)",
+            min_value=float(np.floor(w_min)),
+            max_value=float(np.ceil(w_max)),
+            value=float(np.clip(3.0, w_min, w_max)),
+            step=0.5
+        )
+        tol_w = st.slider("Tolerantie ±m/s", 0.5, 8.0, 2.0, 0.5)
 
-    # Zorg voor nette randen
-    r_min, r_max = np.floor(min(0.0, r_min)), np.ceil(max(5.0, r_max))
-    w
+    st.markdown("_Tip: verlaag de toleranties voor striktere matches, verhoog ze voor breder ‘goed weer’._")
+
+    # Similarity score per dag (Gaussian kernel)
+    dT = (df_all["TG_C"] - t_target) / tol_t
+    dR = (df_all["RH_mm"] - r_target) / tol_r
+    dW = (df_all["FG_ms"] - w_target) / tol_w
+    score_row = np.exp(-(dT**2 + dR**2 + dW**2))
+    df_all["score_row"] = score_row
+
+    # Aggregeren naar station
+    agg = (
+        df_all.groupby(["station_key", "station"], as_index=False)
+              .agg(
+                  score=("score_row", "mean"),
+                  TG_C=("TG_C", "mean"),
+                  RH_mm=("RH_mm", "mean"),
+                  FG_ms=("FG_ms", "mean"),
+                  n_days=("score_row", "count")
+              )
+    )
+
+    # Coördinaten & normalisatie
+    agg["lat"] = agg["station_key"].map(lambda k: STATIONS_META[k]["lat"])
+    agg["lon"] = agg["station_key"].map(lambda k: STATIONS_META[k]["lon"])
+
+    if agg["score"].notna().any():
+        smin, smax = agg["score"].min(), agg["score"].max()
+        agg["score_norm"] = (agg["score"] - smin) / (smax - smin) if smax > smin else 0.0
+    else:
+        agg["score_norm"] = 0.0
+
+    # Kaart
+    if agg.empty or agg["lat"].isna().all():
+        st.info("Geen geldige waarden om op de kaart te tonen voor de gekozen instellingen.")
+    else:
+        size_vals = (agg["score_norm"] * 24.0) + 6.0  # zichtbare minimale marker
+        fig_map_pred = px.scatter_mapbox(
+            agg,
+            lat="lat", lon="lon",
+            color="score_norm",
+            size=size_vals,
+            hover_name="station",
+            hover_data={
+                "lat": False, "lon": False,
+                "score_norm": False,
+                "score": True, "TG_C": True, "RH_mm": True, "FG_ms": True, "n_days": True
+            },
+            color_continuous_scale="Viridis",
+            zoom=6, height=540
+        )
+        fig_map_pred.update_layout(
+            mapbox_style="open-street-map",
+            margin=dict(l=0, r=0, t=10, b=0),
+            coloraxis_colorbar=dict(title="Matchscore (0–1)")
+        )
+        st.plotly_chart(fig_map_pred, use_container_width=True)
+
+    # Top-matches tabel
+    st.subheader("🏆 Beste matches")
+    topn = agg.sort_values("score", ascending=False).head(10)
+    topn_display = topn[["station", "score", "TG_C", "RH_mm", "FG_ms", "n_days"]].rename(columns={
+        "station": "Station",
+        "score": "Score (gem.)",
+        "TG_C": "Gem. Temp (°C)",
+        "RH_mm": "Gem. Neerslag (mm)",
+        "FG_ms": "Gem. Wind (m/s)",
+        "n_days": "Aantal dagen (basis)"
+    })
+    st.dataframe(topn_display, use_container_width=True)
+
+    with st.expander("Wat doet dit model?"):
+        st.markdown(
+            "- We gebruiken je gekozen **temperatuur / neerslag / wind** als doelconditie.\n"
+            "- Voor elke historische dag per station berekenen we een **similarity-score** met een Gaussische kernel op basis van jouw toleranties.\n"
+            "- De **stationscore** is het gemiddelde van die dag-scores: hoe hoger, hoe beter dat station historisch bij jouw weer past.\n"
+            "- Dit is geen meteorologische forecast; het is een **data-gedreven match** op basis van het verleden."
+        )
