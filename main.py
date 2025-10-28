@@ -475,11 +475,17 @@ elif page == "Voorspellingsmodel":
         month_idx = month_names.index(sel_month)
         df_all = df_all[df_all["date"].dt.month == month_idx]
 
-    # Benodigde kolommen aanwezig?
-    need_cols = ["station_key", "station", "TG_C", "RH_mm", "FG_ms"]
-    if not set(need_cols).issubset(df_all.columns):
-        st.error("Benodigde kolommen ontbreken in de data (TG_C, RH_mm, FG_ms).")
-        st.stop()
+ # ✅ Benodigde kolommen afdwingen
+need_cols = ["station_key", "station", "TG_C", "RH_mm", "FG_ms"]
+for col in ["TG_C", "RH_mm", "FG_ms"]:
+    if col not in df_all.columns:
+        st.warning(f"Kolom '{col}' ontbreekt in sommige datasets — ingevuld met NaN.")
+        df_all[col] = np.nan
+
+# Kolommen numeriek maken
+for c in ["TG_C", "RH_mm", "FG_ms"]:
+    df_all[c] = pd.to_numeric(df_all[c], errors="coerce")
+
 
     # Sliders voor gewenste omstandigheden (dynamisch bereik uit data)
     col1, col2, col3 = st.columns(3)
