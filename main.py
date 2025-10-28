@@ -70,15 +70,16 @@ if total_rain: kpi2.metric("🌧️ Totale Neerslag (mm)", total_rain)
 if total_sun: kpi3.metric("☀️ Totale Zonuren", total_sun)
 
 # === PAGINA 1: Overzicht ===
+# === PAGINA 1: Overzicht ===
 if page == "Overzicht":
     from pathlib import Path
     import re
     import numpy as np
 
     st.header("🗺️ Interactieve kaart • Temperatuur, Neerslag & Zonuren")
-    st.caption("Kies jaar/maand en variabelen. Kaart toont de waarde per station; onderaan zie je de correlatie tussen twee variabelen.")
+    st.caption("Kies jaar, maand en variabelen. De kaart toont waarden per KNMI-station; onderaan zie je de correlatie tussen twee variabelen.")
 
-    # 1) Stations (naam + coördinaten)
+    # 1) Stationinformatie
     STATIONS_META = {
         "amsterdam":  {"name": "Amsterdam",  "lat": 52.3676, "lon": 4.9041},
         "de_bilt":    {"name": "De Bilt",    "lat": 52.1010, "lon": 5.1790},
@@ -90,7 +91,7 @@ if page == "Overzicht":
         "vlissingen": {"name": "Vlissingen", "lat": 51.4420, "lon": 3.5730},
     }
 
-    # 2) Alle JSON-bestanden in de map detecteren
+    # 2) JSON-bestanden detecteren
     files = sorted(Path(".").glob("*.json"))
     pat = re.compile(r"^(amsterdam|de_bilt|eelde|eindhoven|ijmuiden|maastricht|twente|vlissingen)_(\d{4}_\d{4})\.json$", re.I)
     found = []
@@ -101,7 +102,7 @@ if page == "Overzicht":
             found.append((station_key, period, str(f)))
 
     if not found:
-        st.warning("Geen station-datasets gevonden (verwacht bv. `Maastricht_2023_2024.json`).")
+        st.warning("Geen JSON-data gevonden (zoals 'Maastricht_2023_2024.json').")
         st.stop()
 
     # 3) Filters
@@ -119,7 +120,7 @@ if page == "Overzicht":
     map_var = colB.selectbox(
         "🗺️ Variabele op kaart",
         ["TG_C", "RH_mm", "SQ_h"],
-        format_func=lambda k: {"TG_C":"Temperatuur (°C)", "RH_mm":"Neerslag (mm)", "SQ_h":"Zonuren (h)"}[k]
+        format_func=lambda k: {"TG_C":"🌡️ Temperatuur (°C)", "RH_mm":"🌧️ Neerslag (mm)", "SQ_h":"☀️ Zonuren (h)"}[k]
     )
 
     agg_choice = colC.radio("Aggregatie", ["Gemiddelde", "Som"], horizontal=True)
@@ -130,7 +131,7 @@ if page == "Overzicht":
     for station_key, period, path_str in found:
         if period not in sel_periods:
             continue
-        dfp = load_data(path_str)  # gebruikt je bestaande loader
+        dfp = load_data(path_str)
         if "date" not in dfp.columns:
             continue
         dfp["station_key"] = station_key
@@ -146,55 +147,73 @@ if page == "Overzicht":
 
     # Maandfilter
     if sel_month != "Alle":
-        month_idx = month_names.index(sel_month)  # 1..12
+        month_idx = month_names.index(sel_month)
         df_all = df_all[df_all["date"].dt.month == month_idx]
 
-    # 5) Aggregatie per station (over de gekozen jaren/maand)
-    for col in ["TG_C","RH_mm","SQ_h"]:
-        if col in df_all.columns:
-            df_all[col] = pd.to_numeric(df_all[col], errors="coerce")
+    # 5) Aggregatie per station
+    for c in ["TG_C", "RH_mm", "SQ_h"]:
+        if c in df_all.columns:
+            df_all[c] = pd.to_numeric(df_all[c], errors="coerce")
 
-    agg_df = (df_all
-              .groupby(["station_key","station"], as_index=False)
-              .agg({map_var: agg_func, "TG_C":"mean", "RH_mm":"sum", "SQ_h":"sum"}))
+    agg_df = (
+        df_all.groupby(["station_key", "station"], as_index=False)
+        .agg({map_var: agg_func, "TG_C": "mean", "RH_mm": "sum", "SQ_h": "sum"})
+    )
 
     # Coördinaten toevoegen
     agg_df["lat"] = agg_df["station_key"].map(lambda k: STATIONS_META[k]["lat"])
     agg_df["lon"] = agg_df["station_key"].map(lambda k: STATIONS_META[k]["lon"])
 
-    # 6) Kaart tekenen
-    color_scale = "RdYlBu_r" if map_var == "TG_C" else ("Blues" if map_var == "RH_mm" else "YlOrBr")
-    map_title = {"TG_C":"Temperatuur (°C)", "RH_mm":"Neerslag (mm)", "SQ_h":"Zonuren (h)"}[map_var]
+    # 6) Data schoonmaken voor de kaart (⚙️ patch tegen ValueError)
+    agg_df = agg_df.replace([np.inf, -np.inf], np.nan)
+    agg_df = agg_df.dropna(subset=["lat", "lon", map_var])
 
-    fig_map = px.scatter_mapbox(
-        agg_df,
-        lat="lat", lon="lon",
-        color=map_var, size=map_var, size_max=28,
-        hover_name="station",
-        hover_data={"lat":False, "lon":False, "TG_C":True, "RH_mm":True, "SQ_h":True},
-        color_continuous_scale=color_scale,
-        zoom=6, height=520
-    )
-    fig_map.update_layout(
-        mapbox_style="open-street-map",
-        margin=dict(l=0,r=0,t=10,b=0),
-        coloraxis_colorbar=dict(title=map_title),
-    )
-    st.plotly_chart(fig_map, use_container_width=True)
+    if agg_df.empty:
+        st.info("Geen geldige waarden om op de kaart te tonen voor de gekozen filters.")
+    else:
+        color_scale = "RdYlBu_r" if map_var == "TG_C" else ("Blues" if map_var == "RH_mm" else "YlOrBr")
+        map_title = {"TG_C":"Temperatuur (°C)", "RH_mm":"Neerslag (mm)", "SQ_h":"Zonuren (h)"}[map_var]
 
-    # 7) Correlatie-analyse (kies twee variabelen)
-    st.subheader("📈 Correlatie tussen variabelen")
+        # Alleen size gebruiken als alle waarden niet-negatief zijn
+        size_kwargs = {}
+        if (agg_df[map_var] >= 0).all():
+            size_kwargs = {"size": map_var, "size_max": 28}
+
+        fig_map = px.scatter_mapbox(
+            agg_df,
+            lat="lat",
+            lon="lon",
+            color=map_var,
+            hover_name="station",
+            hover_data={"lat": False, "lon": False, "TG_C": True, "RH_mm": True, "SQ_h": True},
+            color_continuous_scale=color_scale,
+            zoom=6,
+            height=520,
+            **size_kwargs
+        )
+        fig_map.update_layout(
+            mapbox_style="open-street-map",
+            margin=dict(l=0, r=0, t=10, b=0),
+            coloraxis_colorbar=dict(title=map_title),
+        )
+        st.plotly_chart(fig_map, use_container_width=True)
+
+    # 7) Correlatie-analyse
+    st.subheader("📈 Correlatie tussen variabelen per station")
     colX, colY = st.columns(2)
-    x_var = colX.selectbox("X-as", ["TG_C","RH_mm","SQ_h"], index=0,
+    x_var = colX.selectbox("X-as", ["TG_C", "RH_mm", "SQ_h"], index=0,
                            format_func=lambda k: {"TG_C":"Temperatuur (°C)", "RH_mm":"Neerslag (mm)", "SQ_h":"Zonuren (h)"}[k])
-    y_var = colY.selectbox("Y-as", ["TG_C","RH_mm","SQ_h"], index=2,
+    y_var = colY.selectbox("Y-as", ["TG_C", "RH_mm", "SQ_h"], index=2,
                            format_func=lambda k: {"TG_C":"Temperatuur (°C)", "RH_mm":"Neerslag (mm)", "SQ_h":"Zonuren (h)"}[k])
 
     corr_df = agg_df[[x_var, y_var, "station"]].dropna()
     r = corr_df[x_var].corr(corr_df[y_var]) if len(corr_df) >= 2 else np.nan
 
     fig_sc = px.scatter(
-        corr_df, x=x_var, y=y_var, text="station",
+        corr_df,
+        x=x_var,
+        y=y_var,
+        text="station",
         trendline="ols",
         labels={
             x_var: {"TG_C":"Temperatuur (°C)", "RH_mm":"Neerslag (mm)", "SQ_h":"Zonuren (h)"}[x_var],
@@ -205,7 +224,7 @@ if page == "Overzicht":
     fig_sc.update_traces(marker=dict(size=12, opacity=0.85))
     st.plotly_chart(fig_sc, use_container_width=True)
 
-    st.caption("r = Pearson correlatiecoëfficiënt; dichter bij 1 of −1 betekent sterke (positieve/negatieve) samenhang.")
+    st.caption("r = Pearson-correlatiecoëfficiënt; hoe dichter bij 1 of −1, hoe sterker de lineaire relatie.")
 
 elif page == "Temperatuur Trends":
     st.header("🌡️ Temperatuur Trendss")
