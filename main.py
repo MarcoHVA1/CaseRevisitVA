@@ -71,84 +71,147 @@ if total_sun: kpi3.metric("☀️ Totale Zonuren", total_sun)
 
 
 # === PAGINA 1: Overzicht ===
-if page == "Overzicht":
-    st.header("🌍 Amsterdam: Het Weer in Verandering")
-    st.subheader("🗺️ Interactieve weermap — kies wat je wilt zien")
-
+# === PAGINA: Kaart ===
+elif page == "Kaart":
+    import re
     from pathlib import Path
 
-    # Optionele KNMI-stationsdata (voor coördinaten)
-    stations_path = Path("knmi_stations.csv")
-    stations_df = pd.read_csv(stations_path) if stations_path.exists() else None
+    st.header("🗺️ Interactieve Kaart – Temperatuur, Neerslag & Zonuren")
 
-    # Selectie in de kaart zelf
-    col1, col2 = st.columns([2, 1])
-    with col1:
-        year_choice = st.selectbox("Kies een jaar:", sorted(df["year"].dropna().unique()))
-    with col2:
-        metric_choice = st.selectbox(
-            "Toon op kaart:",
-            ["TG_C", "RH_mm", "SQ_h"],
-            format_func=lambda v: {"TG_C": "🌡️ Temperatuur (°C)",
-                                   "RH_mm": "🌧️ Neerslag (mm)",
-                                   "SQ_h": "☀️ Zonuren (h)"}[v]
-        )
+    # === 1) Bekende stations met coördinaten ===
+    STATIONS_META = {
+        "amsterdam":  {"name": "Amsterdam",  "lat": 52.3676, "lon": 4.9041},
+        "de_bilt":    {"name": "De Bilt",    "lat": 52.1010, "lon": 5.1790},
+        "eelde":      {"name": "Eelde",      "lat": 53.1250, "lon": 6.5833},
+        "eindhoven":  {"name": "Eindhoven",  "lat": 51.4500, "lon": 5.3740},
+        "ijmuiden":   {"name": "IJmuiden",   "lat": 52.4600, "lon": 4.6100},
+        "maastricht": {"name": "Maastricht", "lat": 50.8510, "lon": 5.6910},
+        "twente":     {"name": "Twente",     "lat": 52.2700, "lon": 6.9000},
+        "vlissingen": {"name": "Vlissingen", "lat": 51.4420, "lon": 3.5730},
+    }
 
-    stat_choice = st.radio("Aggregatie:", ["Gemiddelde", "Som"], horizontal=True)
-    agg_func = "mean" if stat_choice == "Gemiddelde" else "sum"
+    # === 2) Automatisch JSON-bestanden detecteren ===
+    files = sorted(Path(".").glob("*.json"))
+    pat = re.compile(r"^(amsterdam|de_bilt|eelde|eindhoven|ijmuiden|maastricht|twente|vlissingen)_(\d{4}_\d{4})\.json$", re.I)
+    found = []
+    for f in files:
+        m = pat.match(f.name)
+        if m:
+            station_key, period = m.group(1).lower(), m.group(2)
+            found.append((station_key, period, str(f)))
 
-    df_year = df[df["year"] == year_choice].copy()
+    if not found:
+        st.warning("Geen dataset-bestanden gevonden (zoals 'amsterdam_2021_2022.json').")
+        st.stop()
 
-    # Aggregatie per station (indien aanwezig)
-    if "STN" in df_year.columns:
-        map_data = df_year.groupby("STN")[metric_choice].agg(agg_func).reset_index()
-        if stations_df is not None and {"STN", "lat", "lon"}.issubset(stations_df.columns):
-            map_data = map_data.merge(stations_df[["STN", "name", "lat", "lon"]], on="STN", how="left")
-    else:
-        # Fallback naar Amsterdam centrum
-        map_data = pd.DataFrame([{
-            "name": "Amsterdam",
-            "lat": 52.3676,
-            "lon": 4.9041,
-            metric_choice: getattr(df_year[metric_choice], agg_func)()
-        }])
+    # === 3) Selectie-opties ===
+    all_periods = sorted({p for _, p, _ in found})
+    sel_periods = st.multiselect("📅 Kies jaren:", all_periods, default=all_periods)
 
-    # Kleurenschema afhankelijk van variabele
-    color_map = {
-        "TG_C": "RdYlBu_r",  # temperatuur
-        "RH_mm": "Blues",    # neerslag
-        "SQ_h": "YlOrBr"     # zonuren
-    }[metric_choice]
+    month_names = [
+        "Alle", "01 - Januari", "02 - Februari", "03 - Maart", "04 - April",
+        "05 - Mei", "06 - Juni", "07 - Juli", "08 - Augustus",
+        "09 - September", "10 - Oktober", "11 - November", "12 - December"
+    ]
+    sel_month = st.selectbox("📆 Maand:", month_names)
 
-    label_map = {"TG_C": "Temperatuur (°C)", "RH_mm": "Neerslag (mm)", "SQ_h": "Zonuren (h)"}
+    metric = st.selectbox(
+        "📊 Variabele:",
+        ["TG_C", "RH_mm", "SQ_h"],
+        format_func=lambda k: {
+            "TG_C": "Gemiddelde temperatuur (°C)",
+            "RH_mm": "Neerslag (mm)",
+            "SQ_h": "Zonuren (h)",
+        }[k]
+    )
 
-    if {"lat", "lon"}.issubset(map_data.columns):
-        fig = px.scatter_mapbox(
-            map_data,
-            lat="lat",
-            lon="lon",
-            color=metric_choice,
-            size=metric_choice,
-            size_max=25,
-            color_continuous_scale=color_map,
-            hover_name="name" if "name" in map_data.columns else None,
-            zoom=6,
-            height=600
-        )
-        fig.update_layout(
-            mapbox_style="open-street-map",
-            margin=dict(l=0, r=0, t=40, b=0),
-            title=f"{label_map[metric_choice]} in {year_choice} ({stat_choice.lower()})",
-            coloraxis_colorbar=dict(title=label_map[metric_choice])
-        )
-        st.plotly_chart(fig, use_container_width=True)
+    # === 4) Data combineren ===
+    frames = []
+    for station_key, period, path_str in found:
+        if period not in sel_periods:
+            continue
+        dfp = load_data(path_str)
+        if "date" not in dfp.columns:
+            continue
+        dfp["station_key"] = station_key
+        dfp["station"] = STATIONS_META[station_key]["name"]
+        dfp["period"] = period
+        frames.append(dfp)
 
-        st.caption(
-            "💡 Tip: gebruik de dropdown hierboven om te wisselen tussen temperatuur, neerslag en zonuren. "
-            "Wanneer er geen stationsdata zijn, wordt een gemiddelde waarde voor Amsterdam weergegeven."
-        )
-    else:
-        st.warning("⚠️ Geen geografische coördinaten gevonden. Voeg optioneel 'knmi_stations.csv' toe met STN, lat, lon, name.")
+    if not frames:
+        st.warning("Geen gegevens voor de geselecteerde combinatie.")
+        st.stop()
+
+    df_all = pd.concat(frames, ignore_index=True)
+
+    # Filter maand (indien niet 'Alle')
+    if sel_month != "Alle":
+        month_idx = month_names.index(sel_month)
+        df_all = df_all[df_all["date"].dt.month == month_idx]
+
+    # === 5) Aggregatie per station ===
+    df_all[metric] = pd.to_numeric(df_all[metric], errors="coerce")
+    agg = (
+        df_all.groupby(["station_key", "station", "period"], as_index=False)[metric]
+        .mean()
+        .dropna(subset=[metric])
+    )
+
+    # Voeg coördinaten toe
+    agg["lat"] = agg["station_key"].map(lambda k: STATIONS_META[k]["lat"])
+    agg["lon"] = agg["station_key"].map(lambda k: STATIONS_META[k]["lon"])
+
+    # === 6) Interactieve kaart ===
+    color_scale = (
+        "RdYlBu_r" if metric == "TG_C"
+        else ("Blues" if metric == "RH_mm" else "YlOrBr")
+    )
+
+    fig_map = px.scatter_mapbox(
+        agg,
+        lat="lat",
+        lon="lon",
+        color=metric,
+        size=metric,
+        size_max=30,
+        hover_name="station",
+        hover_data={"period": True, "lat": False, "lon": False},
+        zoom=6,
+        height=520,
+        color_continuous_scale=color_scale,
+    )
+    fig_map.update_layout(
+        mapbox_style="carto-darkmatter",
+        margin=dict(l=0, r=0, t=30, b=0),
+        title=f"Kaart — {metric} per station (kleur = laag→hoog, grootte = waarde)",
+        coloraxis_colorbar=dict(title=metric),
+    )
+    st.plotly_chart(fig_map, use_container_width=True)
+
+    # === 7) Lijnvergelijking per station ===
+    st.subheader("📈 Trend per station over jaren")
+    trend = (
+        df_all.groupby(["station", "period"], as_index=False)[metric]
+        .mean()
+        .sort_values(["station", "period"])
+    )
+
+    fig_line = px.line(
+        trend,
+        x="period",
+        y=metric,
+        color="station",
+        markers=True,
+        labels={"period": "Jaarperiode", metric: metric},
+        title=f"{metric} – gemiddelde trend per station ({sel_month})",
+    )
+    st.plotly_chart(fig_line, use_container_width=True)
+
+    # === 8) Uitleg ===
+    st.caption(
+        "💡 Kies bovenin de variabele (temperatuur, neerslag of zonuren) en filter op maand of jaar. "
+        "De kaart toont per station de waarde als kleur en grootte, en de grafiek toont trends over jaren."
+    )
 
 elif page == "Temperatuur Trends":
     st.header("🌡️ Temperatuur Trendss")
