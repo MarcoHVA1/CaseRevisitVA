@@ -198,7 +198,6 @@ if page == "Overzicht":
         )
         st.plotly_chart(fig_map, use_container_width=True)
 
-    # 7) Correlatie-analyse
 # === Trend per station (lijn) ===
 st.subheader("📊 Vergelijking per station")
 
