@@ -69,149 +69,107 @@ if avg_temp: kpi1.metric("🌡️ Gemiddelde Temp (°C)", avg_temp)
 if total_rain: kpi2.metric("🌧️ Totale Neerslag (mm)", total_rain)
 if total_sun: kpi3.metric("☀️ Totale Zonuren", total_sun)
 
-
 # === PAGINA 1: Overzicht ===
-# === PAGINA: Kaart ===
-elif page == "Kaart":
-    import re
-    from pathlib import Path
+if page == "Overzicht":
+    st.header("🌍 Amsterdam: Het Weer in Verandering")
+    st.subheader("Warmer – Droger – Zonniger (jaarvergelijking)")
 
-    st.header("🗺️ Interactieve Kaart – Temperatuur, Neerslag & Zonuren")
+    # === Data voorbereiden ===
+    agg_dict = {"TG_C": "mean", "RH_mm": "sum"}
+    if "SQ_h" in df.columns:  # alleen zonuren meenemen als de kolom bestaat
+        agg_dict["SQ_h"] = "sum"
 
-    # === 1) Bekende stations met coördinaten ===
-    STATIONS_META = {
-        "amsterdam":  {"name": "Amsterdam",  "lat": 52.3676, "lon": 4.9041},
-        "de_bilt":    {"name": "De Bilt",    "lat": 52.1010, "lon": 5.1790},
-        "eelde":      {"name": "Eelde",      "lat": 53.1250, "lon": 6.5833},
-        "eindhoven":  {"name": "Eindhoven",  "lat": 51.4500, "lon": 5.3740},
-        "ijmuiden":   {"name": "IJmuiden",   "lat": 52.4600, "lon": 4.6100},
-        "maastricht": {"name": "Maastricht", "lat": 50.8510, "lon": 5.6910},
-        "twente":     {"name": "Twente",     "lat": 52.2700, "lon": 6.9000},
-        "vlissingen": {"name": "Vlissingen", "lat": 51.4420, "lon": 3.5730},
-    }
+    yearly = df.groupby("year").agg(agg_dict).reset_index()
 
-    # === 2) Automatisch JSON-bestanden detecteren ===
-    files = sorted(Path(".").glob("*.json"))
-    pat = re.compile(r"^(amsterdam|de_bilt|eelde|eindhoven|ijmuiden|maastricht|twente|vlissingen)_(\d{4}_\d{4})\.json$", re.I)
-    found = []
-    for f in files:
-        m = pat.match(f.name)
-        if m:
-            station_key, period = m.group(1).lower(), m.group(2)
-            found.append((station_key, period, str(f)))
+    # Zonuren schalen voor gecombineerde as (alleen visueel)
+    if "SQ_h" in yearly.columns:
+        scale_factor = 200
+        yearly["SQ_scaled"] = yearly["SQ_h"] / scale_factor
+    else:
+        scale_factor = 1
+        yearly["SQ_scaled"] = 0
 
-    if not found:
-        st.warning("Geen dataset-bestanden gevonden (zoals 'amsterdam_2021_2022.json').")
-        st.stop()
-
-    # === 3) Selectie-opties ===
-    all_periods = sorted({p for _, p, _ in found})
-    sel_periods = st.multiselect("📅 Kies jaren:", all_periods, default=all_periods)
-
-    month_names = [
-        "Alle", "01 - Januari", "02 - Februari", "03 - Maart", "04 - April",
-        "05 - Mei", "06 - Juni", "07 - Juli", "08 - Augustus",
-        "09 - September", "10 - Oktober", "11 - November", "12 - December"
-    ]
-    sel_month = st.selectbox("📆 Maand:", month_names)
-
-    metric = st.selectbox(
-        "📊 Variabele:",
-        ["TG_C", "RH_mm", "SQ_h"],
-        format_func=lambda k: {
-            "TG_C": "Gemiddelde temperatuur (°C)",
-            "RH_mm": "Neerslag (mm)",
-            "SQ_h": "Zonuren (h)",
-        }[k]
+    # Consistente layout
+    layout_style = dict(
+        font=dict(family="Arial, sans-serif", size=14, color="#ffffff"),
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        xaxis=dict(showgrid=False, zeroline=False, linecolor="grey"),
+        yaxis=dict(showgrid=True, gridcolor="rgba(200,200,200,0.2)"),
+        legend=dict(orientation="h", y=1.15, x=0.5, xanchor="center",
+                    font=dict(size=12, color="#ffffff"))
     )
 
-    # === 4) Data combineren ===
-    frames = []
-    for station_key, period, path_str in found:
-        if period not in sel_periods:
-            continue
-        dfp = load_data(path_str)
-        if "date" not in dfp.columns:
-            continue
-        dfp["station_key"] = station_key
-        dfp["station"] = STATIONS_META[station_key]["name"]
-        dfp["period"] = period
-        frames.append(dfp)
+    # === 1) Jaarvergelijking ===
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=yearly["year"], y=yearly["TG_C"],
+        name="Gem. Temp (°C)", marker_color="#e74c3c",
+        hovertemplate="Gem. Temp: %{y:.1f} °C<br>Jaar: %{x}<extra></extra>"
+    ))
 
-    if not frames:
-        st.warning("Geen gegevens voor de geselecteerde combinatie.")
-        st.stop()
+    if "SQ_h" in df.columns:
+        fig.add_trace(go.Bar(
+            x=yearly["year"], y=yearly["SQ_scaled"],
+            name=f"Zonuren (x{scale_factor}h)", marker_color="#f1c40f",
+            hovertemplate="Zonuren: %{customdata} uur<br>Jaar: %{x}<extra></extra>",
+            customdata=yearly["SQ_h"]
+        ))
 
-    df_all = pd.concat(frames, ignore_index=True)
+    fig.add_trace(go.Scatter(
+        x=yearly["year"], y=yearly["RH_mm"],
+        name="Neerslag (mm)", mode="lines+markers",
+        yaxis="y2", line=dict(color="#3498db", width=3),
+        hovertemplate="Neerslag: %{y:.0f} mm<br>Jaar: %{x}<extra></extra>"
+    ))
 
-    # Filter maand (indien niet 'Alle')
-    if sel_month != "Alle":
-        month_idx = month_names.index(sel_month)
-        df_all = df_all[df_all["date"].dt.month == month_idx]
-
-    # === 5) Aggregatie per station ===
-    df_all[metric] = pd.to_numeric(df_all[metric], errors="coerce")
-    agg = (
-        df_all.groupby(["station_key", "station", "period"], as_index=False)[metric]
-        .mean()
-        .dropna(subset=[metric])
+    fig.update_layout(
+        title="📊 Vergelijking per jaar: Temperatuur, Neerslag en Zonuren",
+        xaxis_title="Jaar",
+        yaxis=dict(title="Temp (°C) & Zonuren (geschaald)", side="left"),
+        yaxis2=dict(title="Neerslag (mm)", overlaying="y", side="right"),
+        barmode="group",
+        **layout_style
     )
+    st.plotly_chart(fig, use_container_width=True)
 
-    # Voeg coördinaten toe
-    agg["lat"] = agg["station_key"].map(lambda k: STATIONS_META[k]["lat"])
-    agg["lon"] = agg["station_key"].map(lambda k: STATIONS_META[k]["lon"])
+    # Praktische conclusie
+    if len(yearly) >= 2:
+        diff_temp = yearly["TG_C"].iloc[-1] - yearly["TG_C"].iloc[-2]
+        diff_rain = yearly["RH_mm"].iloc[-2] - yearly["RH_mm"].iloc[-1]
+        diff_sun = yearly["SQ_h"].iloc[-1] - yearly["SQ_h"].iloc[-2] if "SQ_h" in yearly.columns else 0
+        st.info(
+            f"In {yearly['year'].iloc[-1]} was het gemiddeld {diff_temp:.1f}°C warmer, "
+            f"viel er {diff_rain:.0f} mm minder regen en scheen de zon {diff_sun:.0f} uur langer "
+            f"dan in {yearly['year'].iloc[-2]}."
+        )
 
-    # === 6) Interactieve kaart ===
-    color_scale = (
-        "RdYlBu_r" if metric == "TG_C"
-        else ("Blues" if metric == "RH_mm" else "YlOrBr")
+    # === 2) Lange termijn trend ===
+    avg_yearly_temp = df.groupby("year")["TG_C"].mean().reset_index()
+    fig_trend = px.line(
+        avg_yearly_temp, x="year", y="TG_C", markers=True,
+        title="📈 Lange termijn trend: Gemiddelde jaartemperatuur",
+        labels={"TG_C": "Gemiddelde Temp (°C)", "year": "Jaar"}
     )
+    fig_trend.update_traces(line=dict(color="#e74c3c", width=4))
+    fig_trend.update_layout(**layout_style)
+    st.plotly_chart(fig_trend, use_container_width=True)
 
-    fig_map = px.scatter_mapbox(
-        agg,
-        lat="lat",
-        lon="lon",
-        color=metric,
-        size=metric,
-        size_max=30,
-        hover_name="station",
-        hover_data={"period": True, "lat": False, "lon": False},
-        zoom=6,
-        height=520,
-        color_continuous_scale=color_scale,
-    )
-    fig_map.update_layout(
-        mapbox_style="carto-darkmatter",
-        margin=dict(l=0, r=0, t=30, b=0),
-        title=f"Kaart — {metric} per station (kleur = laag→hoog, grootte = waarde)",
-        coloraxis_colorbar=dict(title=metric),
-    )
-    st.plotly_chart(fig_map, use_container_width=True)
+    # === 3) Gemiddelde temperatuur per seizoen ===
+    season_temp = df.groupby(["year", "season"])["TG_C"].mean().reset_index()
+    season_order = ["winter", "lente", "zomer", "herfst"]
+    season_colors = {"winter": "#3498db", "lente": "#2ecc71", "zomer": "#f1c40f", "herfst": "#e67e22"}
 
-    # === 7) Lijnvergelijking per station ===
-    st.subheader("📈 Trend per station over jaren")
-    trend = (
-        df_all.groupby(["station", "period"], as_index=False)[metric]
-        .mean()
-        .sort_values(["station", "period"])
+    fig_season = px.bar(
+        season_temp, x="year", y="TG_C", color="season",
+        title="🌦️ Gemiddelde temperatuur per seizoen",
+        labels={"TG_C": "Gemiddelde Temp (°C)", "year": "Jaar", "season": "Seizoen"},
+        category_orders={"season": season_order},
+        color_discrete_map=season_colors,
+        barmode="group"
     )
-
-    fig_line = px.line(
-        trend,
-        x="period",
-        y=metric,
-        color="station",
-        markers=True,
-        labels={"period": "Jaarperiode", metric: metric},
-        title=f"{metric} – gemiddelde trend per station ({sel_month})",
-    )
-    st.plotly_chart(fig_line, use_container_width=True)
-
-    # === 8) Uitleg ===
-    st.caption(
-        "💡 Kies bovenin de variabele (temperatuur, neerslag of zonuren) en filter op maand of jaar. "
-        "De kaart toont per station de waarde als kleur en grootte, en de grafiek toont trends over jaren."
-    )
+    fig_season.update_layout(**layout_style)
+    st.plotly_chart(fig_season, use_container_width=True)
 
 elif page == "Temperatuur Trends":
     st.header("🌡️ Temperatuur Trendss")
