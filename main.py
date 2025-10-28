@@ -199,47 +199,7 @@ if page == "Overzicht":
         st.plotly_chart(fig_map, use_container_width=True)
 
 # === Trend per station (lijn) ===
-# === Trend per station (lijn) ===
-st.subheader("📊 Vergelijking per station")
 
-label_map_y = {
-    "TG_C": "Gemiddelde temperatuur (°C)",
-    "RH_mm": "Totale neerslag (mm)",
-    "SQ_h": "Totale zonuren (h)",
-}
-# Voor temperatuur is 'mean' logisch; neerslag/zonuren als jaar-totaal (sum)
-agg_y = "mean" if map_var == "TG_C" else "sum"
-y_label = label_map_y[map_var]
-
-# Jaarreeks per station maken
-ts = (
-    df_all.assign(year=df_all["date"].dt.year)
-          .groupby(["station", "year"], as_index=False)[map_var]
-          .agg(agg_y)
-          .sort_values(["station", "year"])
-)
-
-if ts.empty:
-    st.info("Geen gegevens voor de lijngrafiek met de huidige filters.")
-else:
-    fig_trend = px.line(
-        ts,
-        x="year",
-        y=map_var,
-        color="station",
-        markers=True,
-        labels={"year": "Jaar", map_var: y_label},
-        title=f"{y_label} — trend per station over jaren",
-    )
-    # Kleine polish
-    fig_trend.update_traces(line=dict(width=3))
-    fig_trend.update_layout(legend_title_text="Station")
-    st.plotly_chart(fig_trend, use_container_width=True)
-
-    st.caption(
-        "Cirkels zijn jaarpunten per station. Bovenaan kun je jaren en maand filteren. "
-        "Voor temperatuur tonen we het jaargemiddelde; voor neerslag en zonuren de jaartotalen."
-    )
 elif page == "Temperatuur Trends":
     st.header("🌡️ Temperatuur Trendss")
     use_cols = [c for c in ["TN_C", "TG_C", "TX_C"] if c in df.columns]
