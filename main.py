@@ -343,8 +343,11 @@ elif page == "Windtrends & Topdagen":
         st.plotly_chart(fig_heatmap, use_container_width=True)
 
     # 2. Windroos
-    if "FG_ms" in df.columns and "DDVEC" in df.columns:
-         w = df[["DDVEC", "FG_ms"]].dropna().copy()
+    # === 2. Interactieve windroos (Plotly, robuuste binning) ===
+if "FG_ms" in df.columns and "DDVEC" in df.columns:
+    st.subheader("🧭 Interactieve windroos")
+
+    w = df[["DDVEC", "FG_ms"]].dropna().copy()
     w["DDVEC"] = pd.to_numeric(w["DDVEC"], errors="coerce") % 360
     w["FG_ms"] = pd.to_numeric(w["FG_ms"], errors="coerce")
     w = w.dropna()
@@ -354,39 +357,33 @@ elif page == "Windtrends & Topdagen":
     else:
         colA, colB, colC = st.columns(3)
         with colA:
-            dir_bin = st.slider("Richtingsbin (°)", min_value=10, max_value=45, value=30, step=5)
+            # Gebruik alleen delers van 360 om wrap/duplicaat-randen te vermijden
+            dir_bin = st.selectbox("Richtingsbin (°)", [10, 15, 20, 30, 45], index=3)
         with colB:
-            # Stel de snelheidsklassen in (mm: je kunt dit aanpassen)
-            default_bins = [0, 2, 4, 6, 8, 10, 12, 20]
             bins_text = st.text_input(
                 "Snelheidsklassen m/s (komma-gescheiden)",
                 value="0,2,4,6,8,10,12,20"
             )
             try:
-                speed_bins = [float(x.strip()) for x in bins_text.split(",") if x.strip() != ""]
-                speed_bins = sorted(set(speed_bins))
+                speed_bins = sorted({float(x.strip()) for x in bins_text.split(",") if x.strip() != ""})
                 if len(speed_bins) < 2:
                     raise ValueError
             except Exception:
-                speed_bins = default_bins
+                speed_bins = [0, 2, 4, 6, 8, 10, 12, 20]
                 st.warning("Kon de snelheidsklassen niet parsen; standaard gebruikt.")
         with colC:
             normalize = st.selectbox("Normalisatie", ["% van totaal", "% per richting", "Aantal (ruw)"], index=0)
 
-        # Richtingsbinning
-        edges = np.arange(-dir_bin / 2.0, 360 + dir_bin, dir_bin)
-        # Labels (bv. 0–30°, 30–60°, ...)
-        dir_labels = [f"{int((a)%360)}–{int((b)%360)}°" for a, b in zip(edges[:-1], edges[1:])]
+        # ---- Robuuste richtingsbinning zonder pd.cut ----
+        n_bins = int(360 / dir_bin)
+        # Sector index: 0..n_bins-1
+        sector_idx = ((w["DDVEC"] // dir_bin).astype(int)) % n_bins
+        w["dir_bin_idx"] = sector_idx
+        # Labels voor weergave
+        dir_labels = [f"{k*dir_bin}–{(k+1)*dir_bin}°" for k in range(n_bins)]
+        w["dir_bin"] = w["dir_bin_idx"].map(lambda k: dir_labels[k])
 
-        w["dir_bin"] = pd.cut(
-            w["DDVEC"],
-            bins=edges,
-            labels=dir_labels,
-            include_lowest=True,
-            right=False
-        )
-
-        # Snelheidsbinning
+        # ---- Snelheidsbinning met pd.cut (hier veilig, geen wrap) ----
         speed_labels = [f"{speed_bins[i]}–{speed_bins[i+1]} m/s" for i in range(len(speed_bins)-1)]
         w["speed_bin"] = pd.cut(
             w["FG_ms"],
@@ -396,10 +393,10 @@ elif page == "Windtrends & Topdagen":
             right=False
         )
 
-        # Aggregatie
+        # Aggregeren
         agg = (
             w.dropna(subset=["dir_bin", "speed_bin"])
-             .groupby(["dir_bin", "speed_bin"], as_index=False)
+             .groupby(["dir_bin_idx", "dir_bin", "speed_bin"], as_index=False)
              .size()
              .rename(columns={"size": "count"})
         )
@@ -410,31 +407,43 @@ elif page == "Windtrends & Topdagen":
             # Normalisatie
             if normalize == "% van totaal":
                 total = agg["count"].sum()
-                agg["value"] = 100.0 * agg["count"] / total if total > 0 else 0.0
+                agg["value"] = np.where(total > 0, 100.0 * agg["count"] / total, 0.0)
                 r_title = "Frequentie (%)"
+                tick_suffix = "%"
             elif normalize == "% per richting":
-                dir_tot = agg.groupby("dir_bin")["count"].transform("sum")
+                dir_tot = agg.groupby("dir_bin_idx")["count"].transform("sum")
                 agg["value"] = np.where(dir_tot > 0, 100.0 * agg["count"] / dir_tot, 0.0)
                 r_title = "Aandeel binnen richting (%)"
-            else:  # Aantal (ruw)
+                tick_suffix = "%"
+            else:
                 agg["value"] = agg["count"]
                 r_title = "Aantal"
+                tick_suffix = ""
 
-            # Plotly windrose (bar polar)
-            # Voor juiste hoekpositie: zet een theta-categorievolgorde die overeenkomt met richting
-            # en toon het als cirkel (0° rechts, met klok mee).
+            # Sorteer op hoek-volgorde
+            agg = agg.sort_values("dir_bin_idx")
+
+            # Plotly bar polar (windrose)
             fig_windrose = px.bar_polar(
                 agg,
                 r="value",
-                theta="dir_bin",
+                theta="dir_bin",      # categorie-label per sector
                 color="speed_bin",
                 barmode="stack",
-                hover_data={"count": True, "value": True},
+                hover_data={"count": True, "value": True, "dir_bin_idx": False}
             )
             fig_windrose.update_layout(
                 polar=dict(
-                    angularaxis=dict(direction="clockwise", rotation=90),  # 0° boven → rotation=90 voor 0° rechts
-                    radialaxis=dict(title=r_title, ticksuffix="%" if " %" in r_title else "")
+                    angularaxis=dict(
+                        direction="clockwise",
+                        rotation=90,           # 0° rechts
+                        categoryorder="array", # volgorde van labels expliciet
+                        categoryarray=dir_labels
+                    ),
+                    radialaxis=dict(
+                        title=r_title,
+                        ticksuffix=tick_suffix
+                    )
                 ),
                 margin=dict(l=0, r=0, t=40, b=0),
                 legend_title_text="Snelheid (m/s)"
