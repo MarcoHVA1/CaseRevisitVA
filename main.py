@@ -589,7 +589,7 @@ elif page == "Voorspellingsmodel":
             plot_df["size"] = 0.5
         plot_df["size"] = (plot_df["size"] * 25) + 6 
 
-        TEMP_SCALE_MIN = 30.0-
+        TEMP_SCALE_MIN = 30.0
         TEMP_SCALE_MAX = -5.0
 
     fig = px.scatter_mapbox(
