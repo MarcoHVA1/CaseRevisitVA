@@ -413,18 +413,12 @@ elif page == "Windtrends & Topdagen":
 
 # === PAGINA 5: Voorspellingsmodel ===
 elif page == "Voorspellingsmodel":
-    st.header("🧠 Voorspellingsmodel — waar matcht jouw weer het beste?")
-    st.caption(
-        "Kies gewenste temperatuur, neerslag en windsnelheid. "
-        "We berekenen per station een ‘matchscore’ op basis van historische dagen die hierop lijken."
-    )
+    st.header("🧠 Voorspellingsmodel — voorspel temperatuur (TG_C)")
+    st.caption("Stel **datum**, **neerslag** en **windsnelheid** in. We voorspellen de **temperatuur (°C)** per station en tonen dit op de kaart.")
 
     # JSON-bestanden detecteren
     files = sorted(Path(".").glob("*.json"))
-    pat = re.compile(
-        r"^(amsterdam|de_bilt|eelde|eindhoven|ijmuiden|maastricht|twente|vlissingen)_(\d{4}_\d{4})\.json$",
-        re.I
-    )
+    pat = re.compile(r"^(amsterdam|de_bilt|eelde|eindhoven|ijmuiden|maastricht|twente|vlissingen)_(\d{4}_\d{4})\.json$", re.I)
     found = []
     for f in files:
         m = pat.match(f.name)
@@ -441,11 +435,11 @@ elif page == "Voorspellingsmodel":
     with st.expander("Filters", expanded=True):
         sel_periods = st.multiselect("📅 Kies jaarperiodes:", all_periods, default=all_periods)
         month_names = [
-            "Alle", "01 - Januari", "02 - Februari", "03 - Maart", "04 - April",
-            "05 - Mei", "06 - Juni", "07 - Juli", "08 - Augustus",
-            "09 - September", "10 - Oktober", "11 - November", "12 - December"
+            "Alle","01 - Januari","02 - Februari","03 - Maart","04 - April",
+            "05 - Mei","06 - Juni","07 - Juli","08 - Augustus",
+            "09 - September","10 - Oktober","11 - November","12 - December"
         ]
-        sel_month = st.selectbox("📆 Maand:", month_names, index=0)
+        sel_month = st.selectbox("📆 Maand (optioneel):", month_names, index=0)
 
     # Data laden & samenvoegen
     frames = []
@@ -455,10 +449,10 @@ elif page == "Voorspellingsmodel":
         dfp = load_data(path_str)
         if "date" not in dfp.columns:
             continue
-        # Numeriek maken
         for c in ["TG_C", "RH_mm", "FG_ms"]:
-            if c in dfp.columns:
-                dfp[c] = pd.to_numeric(dfp[c], errors="coerce")
+            if c not in dfp.columns:
+                dfp[c] = np.nan
+            dfp[c] = pd.to_numeric(dfp[c], errors="coerce")
         dfp["station_key"] = station_key
         dfp["station"] = STATIONS_META[station_key]["name"]
         dfp["period"] = period
@@ -475,128 +469,113 @@ elif page == "Voorspellingsmodel":
         month_idx = month_names.index(sel_month)
         df_all = df_all[df_all["date"].dt.month == month_idx]
 
-    # ✅ Benodigde kolommen afdwingen + numeriek maken
-    for col in ["TG_C", "RH_mm", "FG_ms"]:
-        if col not in df_all.columns:
-            st.warning(f"Kolom '{col}' ontbreekt in sommige datasets — ingevuld met NaN.")
-            df_all[col] = np.nan
-        df_all[col] = pd.to_numeric(df_all[col], errors="coerce")
+    # Alleen records met target
+    df_all = df_all.dropna(subset=["TG_C"]).copy()
 
-    # Sliders voor gewenste omstandigheden (dynamisch bereik uit data)
-    col1, col2, col3 = st.columns(3)
-    t_min, t_max = float(np.nanmin(df_all["TG_C"])) - 2.0, float(np.nanmax(df_all["TG_C"])) + 2.0
-    r_min, r_max = 0.0, max(0.0, float(np.nanmax(df_all["RH_mm"])) + 2.0)
-    w_min, w_max = 0.0, max(0.0, float(np.nanmax(df_all["FG_ms"])) + 1.0)
+    # ====== Feature engineering (datum → dag-van-het-jaar sin/cos) ======
+    df_all["doy"] = df_all["date"].dt.dayofyear
+    # Vallen NaT weg? vul met mediane DOY
+    if df_all["doy"].isna().any():
+        df_all["doy"] = df_all["doy"].fillna(int(np.nanmedian(df_all["doy"])))
+    df_all["doy_sin"] = np.sin(2 * np.pi * df_all["doy"] / 366.0)
+    df_all["doy_cos"] = np.cos(2 * np.pi * df_all["doy"] / 366.0)
 
-    with col1:
-        t_target = st.slider(
-            "🌡️ Gewenste temperatuur (°C)",
-            min_value=float(np.floor(t_min)),
-            max_value=float(np.ceil(t_max)),
-            value=float(np.clip(20.0, t_min, t_max)),
-            step=0.5
-        )
-        tol_t = st.slider("Tolerantie ±°C", 0.5, 10.0, 3.0, 0.5)
-    with col2:
-        r_target = st.slider(
-            "🌧️ Gewenste neerslag (mm/dag)",
-            min_value=float(np.floor(r_min)),
-            max_value=float(np.ceil(r_max)),
-            value=float(np.clip(0.0, r_min, r_max)),
-            step=0.5
-        )
-        tol_r = st.slider("Tolerantie ±mm", 0.5, 20.0, 5.0, 0.5)
-    with col3:
-        w_target = st.slider(
-            "💨 Gewenste windsnelheid (m/s)",
-            min_value=float(np.floor(w_min)),
-            max_value=float(np.ceil(w_max)),
-            value=float(np.clip(3.0, w_min, w_max)),
-            step=0.5
-        )
-        tol_w = st.slider("Tolerantie ±m/s", 0.5, 8.0, 2.0, 0.5)
+    # ====== Mini-model per station (lineaire regressie via numpy) ======
+    # TG_C ~ 1 + RH_mm + FG_ms + doy_sin + doy_cos
+    def fit_linear(X, y):
+        # X: (n, p), y: (n,)
+        # Voeg bias/const toe
+        X_ = np.column_stack([np.ones(len(X))] + [X[c].values for c in ["RH_mm","FG_ms","doy_sin","doy_cos"]])
+        # Verwijder rijen met NaN
+        mask = ~np.isnan(X_).any(axis=1) & ~np.isnan(y.values)
+        X_clean = X_[mask]
+        y_clean = y.values[mask]
+        if len(y_clean) < 5:
+            return None  # te weinig data
+        beta, *_ = np.linalg.lstsq(X_clean, y_clean, rcond=None)  # [b0, b1, b2, b3, b4]
+        # In-sample metrics (optioneel)
+        y_hat = X_clean @ beta
+        resid = y_clean - y_hat
+        mae = np.mean(np.abs(resid))
+        rmse = np.sqrt(np.mean(resid**2))
+        ss_res = np.sum(resid**2)
+        ss_tot = np.sum((y_clean - np.mean(y_clean))**2)
+        r2 = 1 - ss_res/ss_tot if ss_tot > 0 else np.nan
+        return {"beta": beta, "mae": mae, "rmse": rmse, "r2": r2, "n": len(y_clean)}
 
-    st.markdown("_Tip: verlaag de toleranties voor striktere matches, verhoog ze voor breder ‘goed weer’._")
+    models = {}
+    for sk, g in df_all.groupby("station_key"):
+        m = fit_linear(g[["RH_mm","FG_ms","doy_sin","doy_cos"]], g["TG_C"])
+        if m is not None:
+            models[sk] = m
 
-    # Similarity score per dag (Gaussian kernel)
-    dT = (df_all["TG_C"] - t_target) / tol_t
-    dR = (df_all["RH_mm"] - r_target) / tol_r
-    dW = (df_all["FG_ms"] - w_target) / tol_w
-    df_all["score_row"] = np.exp(-(dT**2 + dR**2 + dW**2))
+    if not models:
+        st.info("Onvoldoende data om een stationmodel te trainen.")
+        st.stop()
 
-    # Aggregeren naar station
-    agg = (
-        df_all.groupby(["station_key", "station"], as_index=False)
-              .agg(
-                  score=("score_row", "mean"),
-                  TG_C=("TG_C", "mean"),
-                  RH_mm=("RH_mm", "mean"),
-                  FG_ms=("FG_ms", "mean"),
-                  n_days=("score_row", "count")
-              )
-    )
+    # ====== Interactieve inputs (temp is NIET instelbaar) ======
+    from datetime import date as _date
+    colA, colB, colC = st.columns(3)
+    with colA:
+        pred_date = st.date_input("📅 Datum", value=_date(2024, 7, 1))
+    with colB:
+        pred_rain = st.slider("🌧️ Neerslag (mm/dag)", min_value=0.0,
+                              max_value=float(max(50.0, np.nanmax(df_all["RH_mm"]) + 5)),
+                              value=0.0, step=0.5)
+    with colC:
+        pred_wind = st.slider("💨 Windsnelheid (m/s)", min_value=0.0,
+                              max_value=float(max(15.0, np.nanmax(df_all["FG_ms"]) + 2)),
+                              value=3.0, step=0.5)
 
-    # Coördinaten & normalisatie
-    agg["lat"] = agg["station_key"].map(lambda k: STATIONS_META[k]["lat"])
-    agg["lon"] = agg["station_key"].map(lambda k: STATIONS_META[k]["lon"])
+    # Datum → sin/cos
+    _doy = pd.Timestamp(pred_date).dayofyear
+    _sin = np.sin(2 * np.pi * _doy / 366.0)
+    _cos = np.cos(2 * np.pi * _doy / 366.0)
 
-    # Schoonmaken
-    agg = agg.replace([np.inf, -np.inf], np.nan)
+    # ====== Voorspellen voor alle stations ======
+    rows = []
+    for sk, m in models.items():
+        b0, b_rain, b_wind, b_sin, b_cos = m["beta"]
+        pred = b0 + b_rain*pred_rain + b_wind*pred_wind + b_sin*_sin + b_cos*_cos
+        rows.append({
+            "station_key": sk,
+            "station": STATIONS_META.get(sk, {}).get("name", sk),
+            "lat": STATIONS_META.get(sk, {}).get("lat", np.nan),
+            "lon": STATIONS_META.get(sk, {}).get("lon", np.nan),
+            "pred_TG_C": float(pred),
+            "model_r2": m["r2"],
+            "model_rmse": m["rmse"],
+            "n_days": m["n"]
+        })
+    pred_df = pd.DataFrame(rows)
 
-    if agg["score"].notna().any():
-        smin, smax = agg["score"].min(), agg["score"].max()
-        agg["score_norm"] = (agg["score"] - smin) / (smax - smin) if smax > smin else 0.0
-    else:
-        agg["score_norm"] = 0.0
-
-    # Kaart (gebruik size-kolom i.p.v. array)
-    agg["score_norm"] = agg["score_norm"].astype(float).clip(0.0, 1.0)
-    agg["size"] = (agg["score_norm"].fillna(0.0) * 24.0) + 6.0
-
-    plot_df = agg.dropna(subset=["lat", "lon", "score_norm", "size"]).copy()
+    # ====== Kaart met voorspelde temperatuur ======
+    st.subheader("🗺️ Voorspelde temperatuur per station (°C)")
+    plot_df = pred_df.replace([np.inf, -np.inf], np.nan).dropna(subset=["lat","lon","pred_TG_C"]).copy()
 
     if plot_df.empty:
-        st.info("Geen geldige waarden om op de kaart te tonen voor de gekozen instellingen.")
+        st.info("Geen geldige stations om te tonen.")
     else:
-        fig_map_pred = px.scatter_mapbox(
+        # Marker-grootte schaalbaar op relatieve temperatuur
+        if plot_df["pred_TG_C"].max() > plot_df["pred_TG_C"].min():
+            plot_df["size"] = (plot_df["pred_TG_C"] - plot_df["pred_TG_C"].min()) / (plot_df["pred_TG_C"].max() - plot_df["pred_TG_C"].min())
+        else:
+            plot_df["size"] = 0.5
+        plot_df["size"] = (plot_df["size"] * 24.0) + 6.0
+
+        fig_map = px.scatter_mapbox(
             plot_df,
             lat="lat", lon="lon",
-            color="score_norm",
-            size="size",                 # 👈 nu via kolomnaam
+            color="pred_TG_C",
+            size="size",
             hover_name="station",
-            hover_data={
-                "lat": False, "lon": False,
-                "score_norm": True,
-                "score": True, "TG_C": True, "RH_mm": True, "FG_ms": True, "n_days": True,
-                "size": False
-            },
-            color_continuous_scale="Viridis",
+            hover_data={"lat": False, "lon": False, "size": False, "pred_TG_C": True, "model_r2": True, "model_rmse": True, "n_days": True},
+            color_continuous_scale="RdYlBu_r",
             zoom=6, height=540
         )
-        fig_map_pred.update_layout(
+        fig_map.update_layout(
             mapbox_style="open-street-map",
             margin=dict(l=0, r=0, t=10, b=0),
-            coloraxis_colorbar=dict(title="Matchscore (0–1)")
+            coloraxis_colorbar=dict(title="Voorspelde TG_C (°C)")
         )
-        st.plotly_chart(fig_map_pred, use_container_width=True)
-
-    # Top-matches tabel
-    st.subheader("🏆 Beste matches")
-    topn = agg.sort_values("score", ascending=False).head(10)
-    topn_display = topn[["station", "score", "TG_C", "RH_mm", "FG_ms", "n_days"]].rename(columns={
-        "station": "Station",
-        "score": "Score (gem.)",
-        "TG_C": "Gem. Temp (°C)",
-        "RH_mm": "Gem. Neerslag (mm)",
-        "FG_ms": "Gem. Wind (m/s)",
-        "n_days": "Aantal dagen (basis)"
-    })
-    st.dataframe(topn_display, use_container_width=True)
-
-    with st.expander("Wat doet dit model?"):
-        st.markdown(
-            "- We gebruiken je gekozen **temperatuur / neerslag / wind** als doelconditie.\n"
-            "- Voor elke historische dag per station berekenen we een **similarity-score** met een Gaussische kernel op basis van jouw toleranties.\n"
-            "- De **stationscore** is het gemiddelde van die dag-scores: hoe hoger, hoe beter dat station historisch bij jouw weer past.\n"
-            "- Dit is geen meteorologische forecast; het is een **data-gedreven match** op basis van het verleden."
-        )
+        st.plotly_chart(fig_map, use_container_width=True)
