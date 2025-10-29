@@ -475,17 +475,12 @@ elif page == "Voorspellingsmodel":
         month_idx = month_names.index(sel_month)
         df_all = df_all[df_all["date"].dt.month == month_idx]
 
- # ✅ Benodigde kolommen afdwingen
-need_cols = ["station_key", "station", "TG_C", "RH_mm", "FG_ms"]
-for col in ["TG_C", "RH_mm", "FG_ms"]:
-    if col not in df_all.columns:
-        st.warning(f"Kolom '{col}' ontbreekt in sommige datasets — ingevuld met NaN.")
-        df_all[col] = np.nan
-
-# Kolommen numeriek maken
-for c in ["TG_C", "RH_mm", "FG_ms"]:
-    df_all[c] = pd.to_numeric(df_all[c], errors="coerce")
-
+    # ✅ Benodigde kolommen afdwingen + numeriek maken
+    for col in ["TG_C", "RH_mm", "FG_ms"]:
+        if col not in df_all.columns:
+            st.warning(f"Kolom '{col}' ontbreekt in sommige datasets — ingevuld met NaN.")
+            df_all[col] = np.nan
+        df_all[col] = pd.to_numeric(df_all[col], errors="coerce")
 
     # Sliders voor gewenste omstandigheden (dynamisch bereik uit data)
     col1, col2, col3 = st.columns(3)
@@ -527,8 +522,7 @@ for c in ["TG_C", "RH_mm", "FG_ms"]:
     dT = (df_all["TG_C"] - t_target) / tol_t
     dR = (df_all["RH_mm"] - r_target) / tol_r
     dW = (df_all["FG_ms"] - w_target) / tol_w
-    score_row = np.exp(-(dT**2 + dR**2 + dW**2))
-    df_all["score_row"] = score_row
+    df_all["score_row"] = np.exp(-(dT**2 + dR**2 + dW**2))
 
     # Aggregeren naar station
     agg = (
@@ -546,27 +540,35 @@ for c in ["TG_C", "RH_mm", "FG_ms"]:
     agg["lat"] = agg["station_key"].map(lambda k: STATIONS_META[k]["lat"])
     agg["lon"] = agg["station_key"].map(lambda k: STATIONS_META[k]["lon"])
 
+    # Schoonmaken
+    agg = agg.replace([np.inf, -np.inf], np.nan)
+
     if agg["score"].notna().any():
         smin, smax = agg["score"].min(), agg["score"].max()
         agg["score_norm"] = (agg["score"] - smin) / (smax - smin) if smax > smin else 0.0
     else:
         agg["score_norm"] = 0.0
 
-    # Kaart
-    if agg.empty or agg["lat"].isna().all():
+    # Kaart (gebruik size-kolom i.p.v. array)
+    agg["score_norm"] = agg["score_norm"].astype(float).clip(0.0, 1.0)
+    agg["size"] = (agg["score_norm"].fillna(0.0) * 24.0) + 6.0
+
+    plot_df = agg.dropna(subset=["lat", "lon", "score_norm", "size"]).copy()
+
+    if plot_df.empty:
         st.info("Geen geldige waarden om op de kaart te tonen voor de gekozen instellingen.")
     else:
-        size_vals = (agg["score_norm"] * 24.0) + 6.0  # zichtbare minimale marker
         fig_map_pred = px.scatter_mapbox(
-            agg,
+            plot_df,
             lat="lat", lon="lon",
             color="score_norm",
-            size=size_vals,
+            size="size",                 # 👈 nu via kolomnaam
             hover_name="station",
             hover_data={
                 "lat": False, "lon": False,
-                "score_norm": False,
-                "score": True, "TG_C": True, "RH_mm": True, "FG_ms": True, "n_days": True
+                "score_norm": True,
+                "score": True, "TG_C": True, "RH_mm": True, "FG_ms": True, "n_days": True,
+                "size": False
             },
             color_continuous_scale="Viridis",
             zoom=6, height=540
