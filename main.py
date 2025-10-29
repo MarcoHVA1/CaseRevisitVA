@@ -577,6 +577,7 @@ elif page == "Voorspellingsmodel":
     pred_df = pd.DataFrame(rows).replace([np.inf, -np.inf], np.nan)
 
     # === Kaart (ZWART-WIT) met voorspelde temperatuur ===
+       # === Kaart (ZWART-WIT) met voorspelde temperatuur ===
     st.subheader("🗺️ Voorspelde temperatuur per station (°C)")
     plot_df = pred_df.dropna(subset=["lat", "lon", "pred_TG_C"]).copy()
 
@@ -584,72 +585,76 @@ elif page == "Voorspellingsmodel":
         st.info("Geen geldige stations om te tonen.")
     else:
         if plot_df["pred_TG_C"].max() > plot_df["pred_TG_C"].min():
-            plot_df["size"] = (plot_df["pred_TG_C"] - plot_df["pred_TG_C"].min()) / (plot_df["pred_TG_C"].max() - plot_df["pred_TG_C"].min())
+            plot_df["size"] = (plot_df["pred_TG_C"] - plot_df["pred_TG_C"].min()) / (
+                plot_df["pred_TG_C"].max() - plot_df["pred_TG_C"].min()
+            )
         else:
             plot_df["size"] = 0.5
-        plot_df["size"] = (plot_df["size"] * 25) + 6 
+        plot_df["size"] = (plot_df["size"] * 25) + 6
 
-        TEMP_SCALE_MIN = 30.0
-        TEMP_SCALE_MAX = -5.0
+        # ✅ Vaste legenda voor temperatuur (°C)
+        TEMP_SCALE_MIN = -5.0
+        TEMP_SCALE_MAX = 30.0
 
-    fig = px.scatter_mapbox(
-    plot_df,
-    lat="lat",
-    lon="lon",
-    color="pred_TG_C",
-    size="size",
-    color_continuous_scale="RdYlBu_r",   # of "Turbo" op donkere kaart
-    range_color=[TEMP_SCALE_MIN, TEMP_SCALE_MAX],  
-    zoom=6,
-    hover_name="station",
-    hover_data={
-        "pred_TG_C": True,
-        "r2": True,
-        "rmse": True,
-        "n": True,
-        "lat": False,
-        "lon": False,
-        "size": False
-    },
-    height=520
-)
+        fig = px.scatter_mapbox(
+            plot_df,
+            lat="lat",
+            lon="lon",
+            color="pred_TG_C",
+            size="size",
+            color_continuous_scale="RdYlBu_r",   # of "Turbo" voor meer contrast
+            range_color=[TEMP_SCALE_MIN, TEMP_SCALE_MAX],  # vaste schaal
+            zoom=6,
+            hover_name="station",
+            hover_data={
+                "pred_TG_C": True,
+                "r2": True,
+                "rmse": True,
+                "n": True,
+                "lat": False,
+                "lon": False,
+                "size": False
+            },
+            height=520
+        )
 
-fig.update_layout(
-    mapbox_style="carto-darkmatter",  # 🇳🇱 zwart/donker Nederland, zoals je vroeg
-    margin=dict(l=0, r=0, t=10, b=0),
-    coloraxis_colorbar=dict(
-        title="Voorspelde temperatuur",
-        ticksuffix="°C",
-        tickmode="auto"
-    )
-)
+        fig.update_layout(
+            mapbox_style="carto-darkmatter",  # 🇳🇱 zwart/donker Nederland
+            margin=dict(l=0, r=0, t=10, b=0),
+            coloraxis_colorbar=dict(
+                title="Voorspelde temperatuur",
+                ticksuffix="°C",
+                tickmode="auto"
+            )
+        )
 
-    # === Tabel: voorspelde temperatuur (°C), afgerond op 1 decimaal ===
-    st.subheader("📄 Tabel: voorspelde temperatuur (°C)")
-    temp_tbl = (
-        pred_df[["station", "pred_TG_C"]]
-        .rename(columns={
-            "station": "Station",
-            "pred_TG_C": "Voorspelde Temp (°C)"
-        })
-        .assign(**{"Voorspelde Temp (°C)": lambda d: d["Voorspelde Temp (°C)"].round(1)})
-        .sort_values("Voorspelde Temp (°C)", ascending=False)
-        .reset_index(drop=True)
-    )
-    st.dataframe(temp_tbl, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True)
 
-    # === Samenvatting over alle stations ===
-    st.subheader("📈 Gemiddelde modelprestatie in Nederland")
+        # === Tabel: voorspelde temperatuur (°C), afgerond op 1 decimaal ===
+        st.subheader("📄 Tabel: voorspelde temperatuur (°C)")
+        temp_tbl = (
+            pred_df[["station", "pred_TG_C"]]
+            .rename(columns={
+                "station": "Station",
+                "pred_TG_C": "Voorspelde Temp (°C)"
+            })
+            .assign(**{"Voorspelde Temp (°C)": lambda d: d["Voorspelde Temp (°C)"].round(1)})
+            .sort_values("Voorspelde Temp (°C)", ascending=False)
+            .reset_index(drop=True)
+        )
+        st.dataframe(temp_tbl, use_container_width=True)
 
-    avg_temp = pred_df["pred_TG_C"].mean()
-    avg_r2 = pred_df["r2"].mean()
-    avg_rmse = pred_df["rmse"].mean()
+        # === Samenvatting over alle stations ===
+        st.subheader("📈 Gemiddelde modelprestatie in Nederland")
 
-    summary_df = pd.DataFrame([{
-        "Gem. voorspelde temperatuur (°C)": round(avg_temp, 1),
-        "Gem. R² (verklaarde variantie)": round(avg_r2, 2),
-        "Gem. standaardafwijking (°C)": round(avg_rmse, 1)
-    }])
+        avg_temp = pred_df["pred_TG_C"].mean()
+        avg_r2 = pred_df["r2"].mean()
+        avg_rmse = pred_df["rmse"].mean()
 
-    st.table(summary_df)
+        summary_df = pd.DataFrame([{
+            "Gem. voorspelde temperatuur (°C)": round(avg_temp, 1),
+            "Gem. R² (verklaarde variantie)": round(avg_r2, 2),
+            "Gem. standaardafwijking (°C)": round(avg_rmse, 1)
+        }])
 
+        st.table(summary_df)
