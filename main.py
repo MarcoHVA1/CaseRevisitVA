@@ -97,8 +97,9 @@ STATIONS_META = {
     "ijmuiden":   {"name": "IJmuiden",   "lat": 52.4600, "lon": 4.6100},
     "maastricht": {"name": "Maastricht", "lat": 50.8510, "lon": 5.6910},
     "twente":     {"name": "Twente",     "lat": 52.2700, "lon": 6.9000},
-    "vlissingen": {"name": "Vlissingen", "lat": 51.4420, "lon": 3.5730},
+    "vlissingen": {"name": "Vlissingen", "lat": 51.4420, "lon": 3.5730}
 }
+
 
 # === PAGINA 1: Overzicht ===
 if page == "Overzicht":
