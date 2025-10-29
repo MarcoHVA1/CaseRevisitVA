@@ -607,3 +607,18 @@ elif page == "Voorspellingsmodel":
             coloraxis_colorbar=dict(title="Voorspelde temperatuur (°C)")
         )
         st.plotly_chart(fig, use_container_width=True)
+
+    # === Tabel: voorspelde temperatuur (°C), afgerond op 1 decimaal ===
+    st.subheader("📄 Tabel: voorspelde temperatuur (°C)")
+    temp_tbl = (
+        pred_df[["station", "pred_TG_C"]]
+        .rename(columns={
+            "station": "Station",
+            "pred_TG_C": "Voorspelde Temp (°C)"
+        })
+        .assign(**{"Voorspelde Temp (°C)": lambda d: d["Voorspelde Temp (°C)"].round(1)})
+        .sort_values("Voorspelde Temp (°C)", ascending=False)
+        .reset_index(drop=True)
+    )
+    st.dataframe(temp_tbl, use_container_width=True)
+
