@@ -411,12 +411,12 @@ elif page == "Windtrends & Topdagen":
 
         st.plotly_chart(fig_box, use_container_width=True)
 
-# === PAGINA 5: Voorspellingsmodel ===
+# == Pagina 5 == 
 elif page == "Voorspellingsmodel":
-    st.header("🧠 Voorspellingsmodel — voorspel temperatuur (TG_C)")
-    st.caption("Stel **datum**, **neerslag** en **windsnelheid** in. We voorspellen de **temperatuur (°C)** per station en tonen dit op de kaart.")
+    st.header("🧠 Voorspellingsmodel — voorspelde temperatuur in Nederland")
+    st.caption("Pas **maand**, **dag**, **neerslag** en **windsnelheid** aan. Het model voorspelt de verwachte **temperatuur (°C)** per station op basis van historische patronen.")
 
-    # JSON-bestanden detecteren
+    # Alle JSON-bestanden automatisch inlezen
     files = sorted(Path(".").glob("*.json"))
     pat = re.compile(r"^(amsterdam|de_bilt|eelde|eindhoven|ijmuiden|maastricht|twente|vlissingen)_(\d{4}_\d{4})\.json$", re.I)
     found = []
@@ -430,22 +430,9 @@ elif page == "Voorspellingsmodel":
         st.warning("Geen JSON-data gevonden (bijv. 'amsterdam_2023_2024.json').")
         st.stop()
 
-    # Periodes & maandfilter
-    all_periods = sorted({p for _, p, _ in found})
-    with st.expander("Filters", expanded=True):
-        sel_periods = st.multiselect("📅 Kies jaarperiodes:", all_periods, default=all_periods)
-        month_names = [
-            "Alle","01 - Januari","02 - Februari","03 - Maart","04 - April",
-            "05 - Mei","06 - Juni","07 - Juli","08 - Augustus",
-            "09 - September","10 - Oktober","11 - November","12 - December"
-        ]
-        sel_month = st.selectbox("📆 Maand (optioneel):", month_names, index=0)
-
-    # Data laden & samenvoegen
+    # === Alle stations samenvoegen ===
     frames = []
-    for station_key, period, path_str in found:
-        if period not in sel_periods:
-            continue
+    for station_key, _, path_str in found:
         dfp = load_data(path_str)
         if "date" not in dfp.columns:
             continue
@@ -455,127 +442,123 @@ elif page == "Voorspellingsmodel":
             dfp[c] = pd.to_numeric(dfp[c], errors="coerce")
         dfp["station_key"] = station_key
         dfp["station"] = STATIONS_META[station_key]["name"]
-        dfp["period"] = period
         frames.append(dfp)
 
-    if not frames:
-        st.warning("Geen data voor de gekozen filters.")
-        st.stop()
-
     df_all = pd.concat(frames, ignore_index=True)
-
-    # Maandfilter toepassen
-    if sel_month != "Alle":
-        month_idx = month_names.index(sel_month)
-        df_all = df_all[df_all["date"].dt.month == month_idx]
-
-    # Alleen records met target
     df_all = df_all.dropna(subset=["TG_C"]).copy()
 
-    # ====== Feature engineering (datum → dag-van-het-jaar sin/cos) ======
+    # === Datumfeatures maken ===
     df_all["doy"] = df_all["date"].dt.dayofyear
-    # Vallen NaT weg? vul met mediane DOY
-    if df_all["doy"].isna().any():
-        df_all["doy"] = df_all["doy"].fillna(int(np.nanmedian(df_all["doy"])))
     df_all["doy_sin"] = np.sin(2 * np.pi * df_all["doy"] / 366.0)
     df_all["doy_cos"] = np.cos(2 * np.pi * df_all["doy"] / 366.0)
 
-    # ====== Mini-model per station (lineaire regressie via numpy) ======
-    # TG_C ~ 1 + RH_mm + FG_ms + doy_sin + doy_cos
+    # === Model per station trainen ===
     def fit_linear(X, y):
-        # X: (n, p), y: (n,)
-        # Voeg bias/const toe
-        X_ = np.column_stack([np.ones(len(X))] + [X[c].values for c in ["RH_mm","FG_ms","doy_sin","doy_cos"]])
-        # Verwijder rijen met NaN
+        X_ = np.column_stack([np.ones(len(X))] + [X[c].values for c in ["RH_mm", "FG_ms", "doy_sin", "doy_cos"]])
         mask = ~np.isnan(X_).any(axis=1) & ~np.isnan(y.values)
-        X_clean = X_[mask]
-        y_clean = y.values[mask]
+        X_clean, y_clean = X_[mask], y.values[mask]
         if len(y_clean) < 5:
-            return None  # te weinig data
-        beta, *_ = np.linalg.lstsq(X_clean, y_clean, rcond=None)  # [b0, b1, b2, b3, b4]
-        # In-sample metrics (optioneel)
+            return None
+        beta, *_ = np.linalg.lstsq(X_clean, y_clean, rcond=None)
         y_hat = X_clean @ beta
         resid = y_clean - y_hat
-        mae = np.mean(np.abs(resid))
         rmse = np.sqrt(np.mean(resid**2))
         ss_res = np.sum(resid**2)
         ss_tot = np.sum((y_clean - np.mean(y_clean))**2)
-        r2 = 1 - ss_res/ss_tot if ss_tot > 0 else np.nan
-        return {"beta": beta, "mae": mae, "rmse": rmse, "r2": r2, "n": len(y_clean)}
+        r2 = 1 - ss_res / ss_tot if ss_tot > 0 else np.nan
+        return {"beta": beta, "r2": r2, "rmse": rmse, "n": len(y_clean)}
 
     models = {}
     for sk, g in df_all.groupby("station_key"):
-        m = fit_linear(g[["RH_mm","FG_ms","doy_sin","doy_cos"]], g["TG_C"])
-        if m is not None:
+        m = fit_linear(g[["RH_mm", "FG_ms", "doy_sin", "doy_cos"]], g["TG_C"])
+        if m:
             models[sk] = m
 
     if not models:
-        st.info("Onvoldoende data om een stationmodel te trainen.")
+        st.info("Onvoldoende data om te trainen.")
         st.stop()
 
-    # ====== Interactieve inputs (temp is NIET instelbaar) ======
-    from datetime import date as _date
-    colA, colB, colC = st.columns(3)
-    with colA:
-        pred_date = st.date_input("📅 Datum", value=_date(2024, 7, 1))
-    with colB:
-        pred_rain = st.slider("🌧️ Neerslag (mm/dag)", min_value=0.0,
-                              max_value=float(max(50.0, np.nanmax(df_all["RH_mm"]) + 5)),
-                              value=0.0, step=0.5)
-    with colC:
-        pred_wind = st.slider("💨 Windsnelheid (m/s)", min_value=0.0,
-                              max_value=float(max(15.0, np.nanmax(df_all["FG_ms"]) + 2)),
-                              value=3.0, step=0.5)
+    # === Gebruikersinvoer ===
+    st.subheader("⚙️ Stel je omstandigheden in")
+    col1, col2, col3 = st.columns(3)
 
-    # Datum → sin/cos
-    _doy = pd.Timestamp(pred_date).dayofyear
-    _sin = np.sin(2 * np.pi * _doy / 366.0)
-    _cos = np.cos(2 * np.pi * _doy / 366.0)
+    with col1:
+        maand = st.slider("📆 Maand", 1, 12, 7)
+        dag = st.slider("📅 Dag", 1, 31, 15)
+    with col2:
+        pred_rain = st.slider("🌧️ Neerslag (mm/dag)", 0.0, 50.0, 0.0, 0.5)
+    with col3:
+        pred_wind = st.slider("💨 Windsnelheid (m/s)", 0.0, 15.0, 3.0, 0.5)
 
-    # ====== Voorspellen voor alle stations ======
+    doy = ((maand - 1) * 30.4 + dag) % 366  # schatting dag van het jaar
+    doy_sin = np.sin(2 * np.pi * doy / 366.0)
+    doy_cos = np.cos(2 * np.pi * doy / 366.0)
+
+    # === Voorspellen ===
     rows = []
     for sk, m in models.items():
         b0, b_rain, b_wind, b_sin, b_cos = m["beta"]
-        pred = b0 + b_rain*pred_rain + b_wind*pred_wind + b_sin*_sin + b_cos*_cos
+        pred_temp = b0 + b_rain * pred_rain + b_wind * pred_wind + b_sin * doy_sin + b_cos * doy_cos
         rows.append({
             "station_key": sk,
-            "station": STATIONS_META.get(sk, {}).get("name", sk),
-            "lat": STATIONS_META.get(sk, {}).get("lat", np.nan),
-            "lon": STATIONS_META.get(sk, {}).get("lon", np.nan),
-            "pred_TG_C": float(pred),
-            "model_r2": m["r2"],
-            "model_rmse": m["rmse"],
-            "n_days": m["n"]
+            "station": STATIONS_META[sk]["name"],
+            "lat": STATIONS_META[sk]["lat"],
+            "lon": STATIONS_META[sk]["lon"],
+            "pred_TG_C": float(pred_temp),
+            "r2": m["r2"],
+            "rmse": m["rmse"],
+            "n": m["n"]
         })
-    pred_df = pd.DataFrame(rows)
 
-    # ====== Kaart met voorspelde temperatuur ======
+    pred_df = pd.DataFrame(rows).replace([np.inf, -np.inf], np.nan)
+
+    # === Kaartweergave ===
     st.subheader("🗺️ Voorspelde temperatuur per station (°C)")
-    plot_df = pred_df.replace([np.inf, -np.inf], np.nan).dropna(subset=["lat","lon","pred_TG_C"]).copy()
-
-    if plot_df.empty:
-        st.info("Geen geldige stations om te tonen.")
+    if pred_df.empty:
+        st.info("Geen resultaten om te tonen.")
     else:
-        # Marker-grootte schaalbaar op relatieve temperatuur
-        if plot_df["pred_TG_C"].max() > plot_df["pred_TG_C"].min():
-            plot_df["size"] = (plot_df["pred_TG_C"] - plot_df["pred_TG_C"].min()) / (plot_df["pred_TG_C"].max() - plot_df["pred_TG_C"].min())
-        else:
-            plot_df["size"] = 0.5
-        plot_df["size"] = (plot_df["size"] * 24.0) + 6.0
+        pred_df["size"] = (pred_df["pred_TG_C"] - pred_df["pred_TG_C"].min()) / (
+            pred_df["pred_TG_C"].max() - pred_df["pred_TG_C"].min()
+        )
+        pred_df["size"] = (pred_df["size"] * 25) + 6
 
-        fig_map = px.scatter_mapbox(
-            plot_df,
-            lat="lat", lon="lon",
+        fig = px.scatter_mapbox(
+            pred_df,
+            lat="lat",
+            lon="lon",
             color="pred_TG_C",
             size="size",
-            hover_name="station",
-            hover_data={"lat": False, "lon": False, "size": False, "pred_TG_C": True, "model_r2": True, "model_rmse": True, "n_days": True},
             color_continuous_scale="RdYlBu_r",
-            zoom=6, height=540
+            zoom=6,
+            hover_name="station",
+            hover_data={"pred_TG_C": True, "r2": True, "rmse": True, "n": True, "lat": False, "lon": False, "size": False},
+            height=520
         )
-        fig_map.update_layout(
+        fig.update_layout(
             mapbox_style="open-street-map",
             margin=dict(l=0, r=0, t=10, b=0),
-            coloraxis_colorbar=dict(title="Voorspelde TG_C (°C)")
+            coloraxis_colorbar=dict(title="Voorspelde temperatuur (°C)")
         )
-        st.plotly_chart(fig_map, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True)
+
+    # === Tabel met resultaten ===
+    st.subheader("📋 Voorspellingsresultaten per station")
+    st.dataframe(
+        pred_df.sort_values("pred_TG_C", ascending=False)[["station", "pred_TG_C", "r2", "rmse", "n"]].rename(columns={
+            "station": "Station",
+            "pred_TG_C": "Voorspelde Temp (°C)",
+            "r2": "Model R²",
+            "rmse": "RMSE (°C)",
+            "n": "Aantal dagen gebruikt"
+        }),
+        use_container_width=True
+    )
+
+    with st.expander("ℹ️ Over dit model"):
+        st.markdown("""
+        - **Doel:** voorspellen van gemiddelde temperatuur (TG_C) per station.  
+        - **Instelbaar:** maand, dag, neerslag (mm) en windsnelheid (m/s).  
+        - **Model:** eenvoudige lineaire regressie op basis van historische patronen.  
+        - **Nauwkeurigheid:** per station zie je R² en RMSE (lager = beter).  
+        """)
+
