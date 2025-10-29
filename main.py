@@ -602,7 +602,7 @@ elif page == "Voorspellingsmodel":
             height=520
         )
         fig.update_layout(
-            mapbox_style="carto-positron",
+            mapbox_style="carto-darkmatter",
             margin=dict(l=0, r=0, t=10, b=0),
             coloraxis_colorbar=dict(title="Voorspelde temperatuur (°C)")
         )
@@ -621,4 +621,19 @@ elif page == "Voorspellingsmodel":
         .reset_index(drop=True)
     )
     st.dataframe(temp_tbl, use_container_width=True)
+
+    # === Samenvatting over alle stations ===
+    st.subheader("📈 Gemiddelde modelprestatie in Nederland")
+
+    avg_temp = pred_df["pred_TG_C"].mean()
+    avg_r2 = pred_df["r2"].mean()
+    avg_rmse = pred_df["rmse"].mean()
+
+    summary_df = pd.DataFrame([{
+        "Gem. voorspelde temperatuur (°C)": round(avg_temp, 1),
+        "Gem. R² (verklaarde variantie)": round(avg_r2, 2),
+        "Gem. standaardafwijking (°C)": round(avg_rmse, 1)
+    }])
+
+    st.table(summary_df)
 
