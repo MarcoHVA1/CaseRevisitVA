@@ -616,7 +616,7 @@ elif page == "Voorspellingsmodel":
             plot_df["size"] = 0.5
         plot_df["size"] = (plot_df["size"] * 25) + 6
 
-        fig = px.scatter_mapbox(
+              fig = px.scatter_mapbox(
             plot_df,
             lat="lat",
             lon="lon",
@@ -625,9 +625,22 @@ elif page == "Voorspellingsmodel":
             color_continuous_scale="RdYlBu_r",
             zoom=6,
             hover_name="station",
-            hover_data={"pred_TG_C": True, "r2": True, "rmse": True, "n": True, "lat": False, "lon": False, "size": False},
+            hover_data={
+                "pred_TG_C": True,
+                "r2": True,
+                "rmse": True,
+                "n": True,
+                "lat": False,
+                "lon": False,
+                "size": False
+            },
             height=520
         )
-        fig.update_layout(
-            mapbox
 
+        fig.update_layout(
+            mapbox_style="carto-positron",  # 🖤 zwart-witte basemap
+            margin=dict(l=0, r=0, t=10, b=0),
+            coloraxis_colorbar=dict(title="Voorspelde temperatuur (°C)")
+        )
+
+        st.plotly_chart(fig, use_container_width=True)
