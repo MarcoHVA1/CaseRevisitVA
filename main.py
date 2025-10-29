@@ -344,27 +344,102 @@ elif page == "Windtrends & Topdagen":
 
     # 2. Windroos
     if "FG_ms" in df.columns and "DDVEC" in df.columns:
-        try:
-            import matplotlib.pyplot as plt
-            from windrose import WindroseAxes  # vereist het 'windrose' pakket
+         w = df[["DDVEC", "FG_ms"]].dropna().copy()
+    w["DDVEC"] = pd.to_numeric(w["DDVEC"], errors="coerce") % 360
+    w["FG_ms"] = pd.to_numeric(w["FG_ms"], errors="coerce")
+    w = w.dropna()
 
-            w = df[["DDVEC", "FG_ms"]].dropna()
-
-            fig_wind, ax = plt.subplots(subplot_kw={"projection": "windrose"}, figsize=(6, 6))
-            ax.bar(
-                w["DDVEC"],
-                w["FG_ms"],
-                normed=True,
-                opening=0.8,
-                bins=[0, 2, 4, 6, 8, 10, 12],
-                edgecolor="white"
+    if w.empty:
+        st.info("Geen geldige winddata om te tonen.")
+    else:
+        colA, colB, colC = st.columns(3)
+        with colA:
+            dir_bin = st.slider("Richtingsbin (°)", min_value=10, max_value=45, value=30, step=5)
+        with colB:
+            # Stel de snelheidsklassen in (mm: je kunt dit aanpassen)
+            default_bins = [0, 2, 4, 6, 8, 10, 12, 20]
+            bins_text = st.text_input(
+                "Snelheidsklassen m/s (komma-gescheiden)",
+                value="0,2,4,6,8,10,12,20"
             )
-            ax.set_title("Windroos — richting & snelheid (gemiddeld)", pad=20)
-            ax.set_legend(title="m/s", loc="center left", bbox_to_anchor=(1.1, 0.5))
+            try:
+                speed_bins = [float(x.strip()) for x in bins_text.split(",") if x.strip() != ""]
+                speed_bins = sorted(set(speed_bins))
+                if len(speed_bins) < 2:
+                    raise ValueError
+            except Exception:
+                speed_bins = default_bins
+                st.warning("Kon de snelheidsklassen niet parsen; standaard gebruikt.")
+        with colC:
+            normalize = st.selectbox("Normalisatie", ["% van totaal", "% per richting", "Aantal (ruw)"], index=0)
 
-            st.pyplot(fig_wind)
-        except Exception as e:
-            st.info("Kon de windroos niet tekenen. Zorg dat het 'windrose' pakket is geïnstalleerd.\nFout: %s" % e)
+        # Richtingsbinning
+        edges = np.arange(-dir_bin / 2.0, 360 + dir_bin, dir_bin)
+        # Labels (bv. 0–30°, 30–60°, ...)
+        dir_labels = [f"{int((a)%360)}–{int((b)%360)}°" for a, b in zip(edges[:-1], edges[1:])]
+
+        w["dir_bin"] = pd.cut(
+            w["DDVEC"],
+            bins=edges,
+            labels=dir_labels,
+            include_lowest=True,
+            right=False
+        )
+
+        # Snelheidsbinning
+        speed_labels = [f"{speed_bins[i]}–{speed_bins[i+1]} m/s" for i in range(len(speed_bins)-1)]
+        w["speed_bin"] = pd.cut(
+            w["FG_ms"],
+            bins=speed_bins,
+            labels=speed_labels,
+            include_lowest=True,
+            right=False
+        )
+
+        # Aggregatie
+        agg = (
+            w.dropna(subset=["dir_bin", "speed_bin"])
+             .groupby(["dir_bin", "speed_bin"], as_index=False)
+             .size()
+             .rename(columns={"size": "count"})
+        )
+
+        if agg.empty:
+            st.info("Geen data binnen de gekozen bins.")
+        else:
+            # Normalisatie
+            if normalize == "% van totaal":
+                total = agg["count"].sum()
+                agg["value"] = 100.0 * agg["count"] / total if total > 0 else 0.0
+                r_title = "Frequentie (%)"
+            elif normalize == "% per richting":
+                dir_tot = agg.groupby("dir_bin")["count"].transform("sum")
+                agg["value"] = np.where(dir_tot > 0, 100.0 * agg["count"] / dir_tot, 0.0)
+                r_title = "Aandeel binnen richting (%)"
+            else:  # Aantal (ruw)
+                agg["value"] = agg["count"]
+                r_title = "Aantal"
+
+            # Plotly windrose (bar polar)
+            # Voor juiste hoekpositie: zet een theta-categorievolgorde die overeenkomt met richting
+            # en toon het als cirkel (0° rechts, met klok mee).
+            fig_windrose = px.bar_polar(
+                agg,
+                r="value",
+                theta="dir_bin",
+                color="speed_bin",
+                barmode="stack",
+                hover_data={"count": True, "value": True},
+            )
+            fig_windrose.update_layout(
+                polar=dict(
+                    angularaxis=dict(direction="clockwise", rotation=90),  # 0° boven → rotation=90 voor 0° rechts
+                    radialaxis=dict(title=r_title, ticksuffix="%" if " %" in r_title else "")
+                ),
+                margin=dict(l=0, r=0, t=40, b=0),
+                legend_title_text="Snelheid (m/s)"
+            )
+            st.plotly_chart(fig_windrose, use_container_width=True)
 
     # 3. Boxplot windsnelheid per seizoen
     if "FG_ms" in df.columns and "date" in df.columns:
@@ -534,8 +609,9 @@ elif page == "Voorspellingsmodel":
             hover_data={"pred_TG_C": True, "r2": True, "rmse": True, "n": True, "lat": False, "lon": False, "size": False},
             height=520
         )
+
         fig.update_layout(
-            mapbox_style="open-street-map",
+            mapbox_style="carto-positron",
             margin=dict(l=0, r=0, t=10, b=0),
             coloraxis_colorbar=dict(title="Voorspelde temperatuur (°C)")
         )
@@ -549,7 +625,6 @@ elif page == "Voorspellingsmodel":
             "pred_TG_C": "Voorspelde Temp (°C)",
             "r2": "Model R²",
             "rmse": "RMSE (°C)",
-            "n": "Aantal dagen gebruikt"
         }),
         use_container_width=True
     )
