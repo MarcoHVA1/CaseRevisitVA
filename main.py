@@ -498,9 +498,9 @@ if "FG_ms" in df.columns and "DDVEC" in df.columns:
 # == Pagina 5 == 
 elif page == "Voorspellingsmodel":
     st.header("🧠 Voorspellingsmodel — voorspelde temperatuur in Nederland")
-    st.caption("Pas **maand**, **dag**, **neerslag** en **windsnelheid** aan. Het model voorspelt de verwachte **temperatuur (°C)** per station op basis van historische patronen.")
+    st.caption("Pas **maand**, **dag**, **neerslag** en **windsnelheid** aan. Het model voorspelt de **temperatuur (°C)** per station op basis van historische patronen.")
 
-    # Alle JSON-bestanden automatisch inlezen
+    # === Alle JSON-bestanden automatisch inlezen ===
     files = sorted(Path(".").glob("*.json"))
     pat = re.compile(r"^(amsterdam|de_bilt|eelde|eindhoven|ijmuiden|maastricht|twente|vlissingen)_(\d{4}_\d{4})\.json$", re.I)
     found = []
@@ -520,6 +520,7 @@ elif page == "Voorspellingsmodel":
         dfp = load_data(path_str)
         if "date" not in dfp.columns:
             continue
+        # Benodigde kolommen afdwingen + numeriek maken
         for c in ["TG_C", "RH_mm", "FG_ms"]:
             if c not in dfp.columns:
                 dfp[c] = np.nan
@@ -531,83 +532,92 @@ elif page == "Voorspellingsmodel":
     df_all = pd.concat(frames, ignore_index=True)
     df_all = df_all.dropna(subset=["TG_C"]).copy()
 
-    # === Datumfeatures maken ===
+    # === Datumfeatures (dag van jaar → sin/cos) ===
     df_all["doy"] = df_all["date"].dt.dayofyear
+    if df_all["doy"].isna().any():
+        df_all["doy"] = df_all["doy"].fillna(int(np.nanmedian(df_all["doy"])))
     df_all["doy_sin"] = np.sin(2 * np.pi * df_all["doy"] / 366.0)
     df_all["doy_cos"] = np.cos(2 * np.pi * df_all["doy"] / 366.0)
 
-    # === Model per station trainen ===
+    # === Eenvoudig lineair model per station ===
+    # TG_C ~ 1 + RH_mm + FG_ms + doy_sin + doy_cos
     def fit_linear(X, y):
         X_ = np.column_stack([np.ones(len(X))] + [X[c].values for c in ["RH_mm", "FG_ms", "doy_sin", "doy_cos"]])
         mask = ~np.isnan(X_).any(axis=1) & ~np.isnan(y.values)
-        X_clean, y_clean = X_[mask], y.values[mask]
-        if len(y_clean) < 5:
+        Xc, yc = X_[mask], y.values[mask]
+        if len(yc) < 5:
             return None
-        beta, *_ = np.linalg.lstsq(X_clean, y_clean, rcond=None)
-        y_hat = X_clean @ beta
-        resid = y_clean - y_hat
-        rmse = np.sqrt(np.mean(resid**2))
-        ss_res = np.sum(resid**2)
-        ss_tot = np.sum((y_clean - np.mean(y_clean))**2)
+        beta, *_ = np.linalg.lstsq(Xc, yc, rcond=None)
+        yhat = Xc @ beta
+        resid = yc - yhat
+        rmse = float(np.sqrt(np.mean(resid**2)))
+        ss_res = float(np.sum(resid**2))
+        ss_tot = float(np.sum((yc - np.mean(yc))**2))
         r2 = 1 - ss_res / ss_tot if ss_tot > 0 else np.nan
-        return {"beta": beta, "r2": r2, "rmse": rmse, "n": len(y_clean)}
+        return {"beta": beta, "rmse": rmse, "r2": r2, "n": len(yc)}
 
     models = {}
     for sk, g in df_all.groupby("station_key"):
         m = fit_linear(g[["RH_mm", "FG_ms", "doy_sin", "doy_cos"]], g["TG_C"])
-        if m:
+        if m is not None:
             models[sk] = m
 
     if not models:
-        st.info("Onvoldoende data om te trainen.")
+        st.info("Onvoldoende data om een stationmodel te trainen.")
         st.stop()
 
-    # === Gebruikersinvoer ===
+    # === Gebruikersinvoer (maand/dag; temperatuur NIET instelbaar) ===
+    import calendar
     st.subheader("⚙️ Stel je omstandigheden in")
     col1, col2, col3 = st.columns(3)
 
     with col1:
         maand = st.slider("📆 Maand", 1, 12, 7)
-        dag = st.slider("📅 Dag", 1, 31, 15)
+        # Dag begrenzen op aantal dagen in de gekozen maand (jaar 2024 = schrikkeljaar; veilig voor feb 29)
+        max_dag = calendar.monthrange(2024, maand)[1]
+        dag = st.slider("📅 Dag", 1, int(max_dag), min(15, max_dag))
     with col2:
         pred_rain = st.slider("🌧️ Neerslag (mm/dag)", 0.0, 50.0, 0.0, 0.5)
     with col3:
         pred_wind = st.slider("💨 Windsnelheid (m/s)", 0.0, 15.0, 3.0, 0.5)
 
-    doy = ((maand - 1) * 30.4 + dag) % 366  # schatting dag van het jaar
-    doy_sin = np.sin(2 * np.pi * doy / 366.0)
-    doy_cos = np.cos(2 * np.pi * doy / 366.0)
+    # Dag-van-het-jaar afleiden uit maand/dag
+    doy = pd.Timestamp(year=2024, month=int(maand), day=int(dag)).dayofyear
+    doy_sin = float(np.sin(2 * np.pi * doy / 366.0))
+    doy_cos = float(np.cos(2 * np.pi * doy / 366.0))
 
-    # === Voorspellen ===
+    # === Voorspellen voor alle stations ===
     rows = []
     for sk, m in models.items():
         b0, b_rain, b_wind, b_sin, b_cos = m["beta"]
         pred_temp = b0 + b_rain * pred_rain + b_wind * pred_wind + b_sin * doy_sin + b_cos * doy_cos
         rows.append({
             "station_key": sk,
-            "station": STATIONS_META[sk]["name"],
-            "lat": STATIONS_META[sk]["lat"],
-            "lon": STATIONS_META[sk]["lon"],
+            "station": STATIONS_META.get(sk, {}).get("name", sk),
+            "lat": STATIONS_META.get(sk, {}).get("lat", np.nan),
+            "lon": STATIONS_META.get(sk, {}).get("lon", np.nan),
             "pred_TG_C": float(pred_temp),
             "r2": m["r2"],
             "rmse": m["rmse"],
             "n": m["n"]
         })
-
     pred_df = pd.DataFrame(rows).replace([np.inf, -np.inf], np.nan)
 
-    # === Kaartweergave ===
+    # === Kaart (ZWART-WIT) met voorspelde temperatuur ===
     st.subheader("🗺️ Voorspelde temperatuur per station (°C)")
-    if pred_df.empty:
-        st.info("Geen resultaten om te tonen.")
+    plot_df = pred_df.dropna(subset=["lat", "lon", "pred_TG_C"]).copy()
+
+    if plot_df.empty:
+        st.info("Geen geldige stations om te tonen.")
     else:
-        pred_df["size"] = (pred_df["pred_TG_C"] - pred_df["pred_TG_C"].min()) / (
-            pred_df["pred_TG_C"].max() - pred_df["pred_TG_C"].min()
-        )
-        pred_df["size"] = (pred_df["size"] * 25) + 6
+        if plot_df["pred_TG_C"].max() > plot_df["pred_TG_C"].min():
+            plot_df["size"] = (plot_df["pred_TG_C"] - plot_df["pred_TG_C"].min()) / (plot_df["pred_TG_C"].max() - plot_df["pred_TG_C"].min())
+        else:
+            plot_df["size"] = 0.5
+        plot_df["size"] = (plot_df["size"] * 25) + 6
 
         fig = px.scatter_mapbox(
-            pred_df,
+            plot_df,
             lat="lat",
             lon="lon",
             color="pred_TG_C",
@@ -618,31 +628,6 @@ elif page == "Voorspellingsmodel":
             hover_data={"pred_TG_C": True, "r2": True, "rmse": True, "n": True, "lat": False, "lon": False, "size": False},
             height=520
         )
-
         fig.update_layout(
-            mapbox_style="carto-positron",
-            margin=dict(l=0, r=0, t=10, b=0),
-            coloraxis_colorbar=dict(title="Voorspelde temperatuur (°C)")
-        )
-        st.plotly_chart(fig, use_container_width=True)
-
-    # === Tabel met resultaten ===
-    st.subheader("📋 Voorspellingsresultaten per station")
-    st.dataframe(
-        pred_df.sort_values("pred_TG_C", ascending=False)[["station", "pred_TG_C", "r2", "rmse", "n"]].rename(columns={
-            "station": "Station",
-            "pred_TG_C": "Voorspelde Temp (°C)",
-            "r2": "Model R²",
-            "rmse": "RMSE (°C)",
-        }),
-        use_container_width=True
-    )
-
-    with st.expander("ℹ️ Over dit model"):
-        st.markdown("""
-        - **Doel:** voorspellen van gemiddelde temperatuur (TG_C) per station.  
-        - **Instelbaar:** maand, dag, neerslag (mm) en windsnelheid (m/s).  
-        - **Model:** eenvoudige lineaire regressie op basis van historische patronen.  
-        - **Nauwkeurigheid:** per station zie je R² en RMSE (lager = beter).  
-        """)
+            mapbox
 
