@@ -534,13 +534,11 @@ elif page == "Voorspellingsmodel":
 
     # === Datumfeatures (dag van jaar → sin/cos) ===
     df_all["doy"] = df_all["date"].dt.dayofyear
-    if df_all["doy"].isna().any():
-        df_all["doy"] = df_all["doy"].fillna(int(np.nanmedian(df_all["doy"])))
+    df_all["doy"] = df_all["doy"].fillna(df_all["doy"].median())
     df_all["doy_sin"] = np.sin(2 * np.pi * df_all["doy"] / 366.0)
     df_all["doy_cos"] = np.cos(2 * np.pi * df_all["doy"] / 366.0)
 
     # === Eenvoudig lineair model per station ===
-    # TG_C ~ 1 + RH_mm + FG_ms + doy_sin + doy_cos
     def fit_linear(X, y):
         X_ = np.column_stack([np.ones(len(X))] + [X[c].values for c in ["RH_mm", "FG_ms", "doy_sin", "doy_cos"]])
         mask = ~np.isnan(X_).any(axis=1) & ~np.isnan(y.values)
@@ -566,14 +564,13 @@ elif page == "Voorspellingsmodel":
         st.info("Onvoldoende data om een stationmodel te trainen.")
         st.stop()
 
-    # === Gebruikersinvoer (maand/dag; temperatuur NIET instelbaar) ===
+    # === Gebruikersinvoer ===
     import calendar
     st.subheader("⚙️ Stel je omstandigheden in")
     col1, col2, col3 = st.columns(3)
 
     with col1:
         maand = st.slider("📆 Maand", 1, 12, 7)
-        # Dag begrenzen op aantal dagen in de gekozen maand (jaar 2024 = schrikkeljaar; veilig voor feb 29)
         max_dag = calendar.monthrange(2024, maand)[1]
         dag = st.slider("📅 Dag", 1, int(max_dag), min(15, max_dag))
     with col2:
@@ -581,12 +578,19 @@ elif page == "Voorspellingsmodel":
     with col3:
         pred_wind = st.slider("💨 Windsnelheid (m/s)", 0.0, 15.0, 3.0, 0.5)
 
-    # Dag-van-het-jaar afleiden uit maand/dag
-    doy = pd.Timestamp(year=2024, month=int(maand), day=int(dag)).dayofyear
+ # === Valideer dag en maand ===
+try:
+    # Controleer of deze combinatie geldig is (ValueError als niet)
+    selected_date = pd.Timestamp(year=2024, month=int(maand), day=int(dag))
+    doy = selected_date.dayofyear
     doy_sin = float(np.sin(2 * np.pi * doy / 366.0))
     doy_cos = float(np.cos(2 * np.pi * doy / 366.0))
+except ValueError:
+    # Ongeldige dag voor maand (zoals 31 april)
+    st.error(f"❌ Ongeldige datum: {dag} / {maand}. Controleer of deze dag in de gekozen maand voorkomt.")
+    st.stop()
 
-    # === Voorspellen voor alle stations ===
+    # === Voorspellen per station ===
     rows = []
     for sk, m in models.items():
         b0, b_rain, b_wind, b_sin, b_cos = m["beta"]
@@ -601,6 +605,7 @@ elif page == "Voorspellingsmodel":
             "rmse": m["rmse"],
             "n": m["n"]
         })
+
     pred_df = pd.DataFrame(rows).replace([np.inf, -np.inf], np.nan)
 
     # === Kaart (ZWART-WIT) met voorspelde temperatuur ===
@@ -616,7 +621,7 @@ elif page == "Voorspellingsmodel":
             plot_df["size"] = 0.5
         plot_df["size"] = (plot_df["size"] * 25) + 6
 
-              fig = px.scatter_mapbox(
+        fig = px.scatter_mapbox(
             plot_df,
             lat="lat",
             lon="lon",
@@ -644,3 +649,25 @@ elif page == "Voorspellingsmodel":
         )
 
         st.plotly_chart(fig, use_container_width=True)
+
+    # === Tabel met resultaten ===
+    st.subheader("📋 Voorspellingsresultaten per station")
+    st.dataframe(
+        pred_df.sort_values("pred_TG_C", ascending=False)[["station", "pred_TG_C", "r2", "rmse", "n"]].rename(columns={
+            "station": "Station",
+            "pred_TG_C": "Voorspelde Temp (°C)",
+            "r2": "Model R² (in-sample)",
+            "rmse": "RMSE (°C, in-sample)",
+            "n": "Aantal dagen gebruikt"
+        }),
+        use_container_width=True
+    )
+
+    with st.expander("ℹ️ Over dit model"):
+        st.markdown("""
+        - **Doel:** voorspellen van gemiddelde temperatuur (TG_C) per station.  
+        - **Instelbaar:** **maand**, **dag**, **neerslag** (mm) en **windsnelheid** (m/s).  
+        - **Model:** per station een eenvoudige lineaire regressie op historische data.  
+        - **Nauwkeurigheid:** per station tonen we **R²** en **RMSE** (in-sample).  
+        - **Kaartstijl:** zwart-wit via `carto-positron` zodat temperatuurkleuren duidelijk afsteken.  
+        """)
