@@ -222,13 +222,11 @@ def render_windrose(raw_df: pd.DataFrame, *, title="🧭 Windroos", facet_per_st
     w["FG_ms"] = pd.to_numeric(w["FG_ms"], errors="coerce")
     w = w.dropna()
 
-    # ✅ FIX: Als we niet per station facetteren, stations eerst samenvoegen
-    # Zo stapelt Plotly niet meerdere stations op dezelfde richting en
-    # blijven percentages (zowel van totaal als per richting) ≤ 100%.
+    # Stations samenvoegen als we niet per station facetteren (voorkomt dubbel stapelen)
     if not facet_per_station:
         w["station"] = "Alle stations"
 
-    c1, c2, c3 = st.columns(3)
+    c1, c2 = st.columns(2)
     with c1:
         dir_bin = st.selectbox("Richtingsbin (°)", [10, 15, 20, 30, 45], index=3)
     with c2:
@@ -240,8 +238,6 @@ def render_windrose(raw_df: pd.DataFrame, *, title="🧭 Windroos", facet_per_st
         except Exception:
             speed_bins = [0, 2, 4, 6, 8, 10, 12, 20]
             st.warning("Kon de snelheidsklassen niet parsen; standaard gebruikt.")
-    with c3:
-        normalize = st.selectbox("Normalisatie", ["% van totaal", "% per richting", "Aantal (ruw)"], index=0)
 
     n_bins = int(360 / dir_bin)
     w["dir_bin_idx"] = (np.floor(w["DDVEC"] / dir_bin).astype(int)) % n_bins
@@ -261,17 +257,10 @@ def render_windrose(raw_df: pd.DataFrame, *, title="🧭 Windroos", facet_per_st
         st.info("Geen data binnen de gekozen bins.")
         return
 
-    if normalize == "% van totaal":
-        total = agg.groupby("station")["count"].transform("sum")
-        agg["value"] = np.where(total > 0, 100.0 * agg["count"] / total, 0.0)
-        r_title, tick_suffix = "Frequentie", "%"
-    elif normalize == "% per richting":
-        dir_tot = agg.groupby(["station", "dir_bin_idx"])["count"].transform("sum")
-        agg["value"] = np.where(dir_tot > 0, 100.0 * agg["count"] / dir_tot, 0.0)
-        r_title, tick_suffix = "Aandeel binnen richting", "%"
-    else:
-        agg["value"] = agg["count"]
-        r_title, tick_suffix = "Aantal", ""
+    # === Normalisatie: totaal = 100% (niet per richting)
+    total = agg.groupby("station")["count"].transform("sum")
+    agg["value"] = np.where(total > 0, 100.0 * agg["count"] / total, 0.0)
+    r_title, tick_suffix = "Aandeel (totaal = 100%)", "%"
 
     facets = {"facet_row": "station"} if facet_per_station and agg["station"].nunique() > 1 else {}
     fig = px.bar_polar(
@@ -725,7 +714,7 @@ elif page == "Voorspellingsmodel":
     )
     if not missing.empty:
         fig.add_trace(go.Scattermapbox(
-            lat=missing["lat"], lon="lon", mode="markers",
+            lat=missing["lat"], lon=missing["lon"], mode="markers",
             marker=dict(size=14, color="#A0A0A0"), name="Geen voorspelling",
             text=missing["station"], hoverinfo="text"
         ))
