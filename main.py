@@ -24,7 +24,7 @@ def load_data(path: str):
     # Datum parsing
     if "date" in df.columns:
         try:
-            df["date"] = pd.to_datetime(df["date"])
+            df["date"] = pd.to_datetime(df["date"])  # allow ISO/date-like
         except Exception:
             df["date"] = pd.to_datetime(df["date"].astype(str), format="%Y%m%d", errors="coerce")
 
@@ -39,7 +39,7 @@ def load_data(path: str):
     make_scaled("RH", "RH_mm")  # Neerslag (tienden mm)
     make_scaled("SQ", "SQ_h")   # Zonuren (tienden uur)
 
-    # Windsnelheid berekenen (FG = in tienden m/s bij KNMI)
+    # Windsnelheid berekenen (FG = tienden m/s bij KNMI)
     if "FG" in df.columns:
         df["FG_ms"] = pd.to_numeric(df["FG"], errors="coerce") / 10.0
 
@@ -144,14 +144,14 @@ def selection_controls(key_prefix: str = ""):
 
     df_all = build_dataset(tuple(sel_periods), tuple(stations))
 
-    # Aggregatie: voor "Alle locaties" middelen we per datum over stations (i.p.v. sommeren)
+    # Aggregatie: voor "Alle locaties" middelen we per datum over stations
     if mode == "Alle locaties (geaggregeerd)" and not df_all.empty:
         num_cols = [c for c in ["TN_C", "TG_C", "TX_C", "RH_mm", "SQ_h", "FG_ms"] if c in df_all.columns]
         keep_cols = ["date"] + num_cols
         g = (
             df_all[keep_cols + ["station"]]
-              .groupby("date", as_index=False)
-              .agg({c: "mean" for c in num_cols})
+                .groupby("date", as_index=False)
+                .agg({c: "mean" for c in num_cols})
         )
         # Herstel afgeleide datumvelden (maand/season) voor downstream groupby's
         g["month"] = g["date"].dt.month
@@ -167,6 +167,7 @@ def selection_controls(key_prefix: str = ""):
         g["station_key"] = "all"
         g["period"] = ", ".join(sel_periods)
         df_all = g
+
     return df_all, mode
 
 # -----------------------------------------------------------------------------
@@ -189,10 +190,10 @@ page = st.sidebar.radio(
 # KPI-tegels (op basis van alle data die aanwezig is)
 # -----------------------------------------------------------------------------
 # Gebruik alle bestanden en reken gemiddelde KPI's over alle stations (zonder UI-calls)
-found_kpi = discover_files()
-all_periods_kpi = sorted({p for _, p, _ in found_kpi})
-all_station_keys_kpi = list(STATIONS_META.keys())
-df_kpi = build_dataset(tuple(all_periods_kpi), tuple(all_station_keys_kpi))
+_found_kpi = discover_files()
+_all_periods_kpi = sorted({p for _, p, _ in _found_kpi})
+_all_station_keys_kpi = list(STATIONS_META.keys())
+df_kpi = build_dataset(tuple(_all_periods_kpi), tuple(_all_station_keys_kpi))
 
 if df_kpi.empty:
     avg_temp = total_rain = total_sun = None
@@ -214,14 +215,15 @@ if total_sun is not None:
 # -----------------------------------------------------------------------------
 if page == "Overzicht":
     st.header("🗺️ Interactieve kaart • Temperatuur, Neerslag & Zonuren")
-    st.caption("Kies jaarperiodes en variabelen. De kaart toont waarden per KNMI-station. Stations zonder data worden grijs getoond (incl. IJmuiden).")
+    st.caption("Kies jaarperiodes en variabelen. De kaart toont waarden per KNMI-station; stations zonder data worden grijs weergegeven.")
 
+    # Detecteer bestanden
     found = discover_files()
     if not found:
         st.warning("Geen JSON-data gevonden.")
         st.stop()
 
-    # Filters
+    # Jaarperiodes bovenaan
     all_periods = sorted({p for _, p, _ in found})
     sel_periods = st.multiselect("📅 Kies jaarperiodes:", all_periods, default=all_periods, key="ov_periods")
 
@@ -242,7 +244,7 @@ if page == "Overzicht":
     agg_choice = colC.radio("Aggregatie", ["Gemiddelde", "Som"], horizontal=True)
     agg_func = "mean" if agg_choice == "Gemiddelde" else "sum"
 
-    # Data samenvoegen
+    # Data samenvoegen voor alle stations
     frames = []
     for station_key, period, path_str in found:
         if period not in sel_periods:
@@ -274,19 +276,17 @@ if page == "Overzicht":
         .agg({map_var: agg_func, "TG_C": "mean", "RH_mm": "sum", "SQ_h": "sum"})
     )
 
+    # Coördinaten
     agg_df["lat"] = agg_df["station_key"].map(lambda k: STATIONS_META[k]["lat"])
     agg_df["lon"] = agg_df["station_key"].map(lambda k: STATIONS_META[k]["lon"])
 
-    agg_df = agg_df.replace([np.inf, -np.inf], np.nan)
-
-    # Maak een volledige stationslijst (zodat IJmuiden altijd zichtbaar is)
+    # Maak volledige stationslijst en merge zodat missende stations (bv. IJmuiden) zichtbaar zijn
     stations_full = pd.DataFrame([
         {"station_key": k, "station": v["name"], "lat": v["lat"], "lon": v["lon"]}
         for k, v in STATIONS_META.items()
     ])
     agg_df = stations_full.merge(agg_df, on=["station_key", "station", "lat", "lon"], how="left")
 
-    # Splits valid/missing per kaartvariabele
     valid = agg_df.dropna(subset=[map_var]).copy()
     missing = agg_df[agg_df[map_var].isna()].copy()
 
@@ -342,34 +342,22 @@ elif page == "Temperatuur Trends":
         st.info("Geen data beschikbaar voor de gekozen filters.")
         st.stop()
 
-    # Lijnplot min/gem/max (per station of geaggregeerd)
+    # Zorg dat 'season' bestaat
+    if "season" not in df.columns:
+        df["month"] = df["date"].dt.month
+        def _season(m):
+            return (
+                "winter" if m in [12, 1, 2]
+                else "lente" if m in [3, 4, 5]
+                else "zomer" if m in [6, 7, 8]
+                else "herfst"
+            )
+        df["season"] = df["month"].apply(_season)
+
+    # Lijnplot min/gem/max
     use_cols = [c for c in ["TN_C", "TG_C", "TX_C"] if c in df.columns]
     if use_cols:
         label_map = {"TN_C": "Min temp", "TG_C": "Gem temp", "TX_C": "Max temp"}
         if "station" not in df.columns:
             df["station"] = "Alle stations"
-        temp = df[["date", "station"] + use_cols].melt(["date", "station"], var_name="type", value_name="temp_C")
-        temp["type"] = temp["type"].replace(label_map)
-
-        facet_args = {}
-        if mode == "Vergelijk locaties":
-            facet_args = {"facet_row": "station"}
-
-        fig = px.line(
-            temp, x="date", y="temp_C", color="type", **facet_args,
-            labels={"temp_C": "Temperatuur (°C)", "date": "Datum", "type": "Type"},
-            title="Dagelijkse temperatuur (min, gem, max)"
-        )
-        st.plotly_chart(fig, use_container_width=True)
-
-    # Boxplot temperatuur per maand
-    dft = df.copy()
-    dft["month_name"] = dft["date"].dt.month_name()
-    fig_box = px.box(
-        dft, x="month_name", y="TG_C", color=("station" if mode == "Vergelijk locaties" else None),
-        category_orders={"month_name": [
-            "January", "February", "March", "April", "May", "June",
-            "July", "August", "September", "October", "November", "December"
-        ]},
-        title="📦 Verdeling van gemiddelde temperatuur per maand",
-        labels={"month_name": "Maand", "TG_C": "Gemiddelde
+        temp = df[["date", "sta
