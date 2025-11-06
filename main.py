@@ -40,9 +40,11 @@ def load_data(path: str):
     make_scaled("RH", "RH_mm")
     make_scaled("SQ", "SQ_h")
 
-    # Wind (FG in tienden m/s)
+    # Wind (FG in tienden m/s) + richting
     if "FG" in df.columns:
         df["FG_ms"] = pd.to_numeric(df["FG"], errors="coerce") / 10.0
+    if "DDVEC" in df.columns:
+        df["DDVEC"] = pd.to_numeric(df["DDVEC"], errors="coerce")
 
     # Afgeleide datumvelden
     if "date" in df.columns:
@@ -76,7 +78,10 @@ STATIONS_META = {
 
 @st.cache_data
 def discover_files():
-    """Zoek alle JSON-bestanden per station/jaartal (incl. IJmuiden)."""
+    """
+    Zoek alle JSON-bestanden per station/jaartal (case-insensitive),
+    o.a. Ijmuiden_2021_2022.json, Ijmuiden_2022_2023.json, Ijmuiden_2023_2024.json
+    """
     files = sorted(Path(".").glob("*.json"))
     pat = re.compile(
         r"^(amsterdam|de_bilt|eelde|eindhoven|ijmuiden|maastricht|twente|vlissingen)_(\d{4}_\d{4})\.json$",
@@ -106,7 +111,7 @@ def build_dataset(selected_periods: tuple, selected_stations: tuple):
         if "date" not in dfp.columns:
             continue
 
-        for c in ["TG_C", "TN_C", "TX_C", "RH_mm", "SQ_h", "FG_ms"]:
+        for c in ["TG_C", "TN_C", "TX_C", "RH_mm", "SQ_h", "FG_ms", "DDVEC"]:
             if c in dfp.columns:
                 dfp[c] = pd.to_numeric(dfp[c], errors="coerce")
 
@@ -534,6 +539,7 @@ elif page == "Windtrends & Topdagen":
     if "FG_ms" in df.columns and "DDVEC" in df.columns:
         st.subheader("🧭 Interactieve windroos")
 
+        # Gebruik ruwe rijen bij aggregaatmodus zodat DDVEC behouden blijft
         w_source = df
         if mode == "Alle locaties (geaggregeerd)":
             found = discover_files()
@@ -546,7 +552,7 @@ elif page == "Windtrends & Topdagen":
             w_source = raw
 
         w = w_source[["station", "DDVEC", "FG_ms"]].dropna().copy()
-        w["DDVEC"] = pd.to_numeric(w["DDVEC"], errors="coerce") % 360
+        w["DDVEC"] = (pd.to_numeric(w["DDVEC"], errors="coerce") % 360).astype(float)
         w["FG_ms"] = pd.to_numeric(w["FG_ms"], errors="coerce")
         w = w.dropna()
 
