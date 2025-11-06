@@ -222,6 +222,12 @@ def render_windrose(raw_df: pd.DataFrame, *, title="🧭 Windroos", facet_per_st
     w["FG_ms"] = pd.to_numeric(w["FG_ms"], errors="coerce")
     w = w.dropna()
 
+    # ✅ FIX: Als we niet per station facetteren, stations eerst samenvoegen
+    # Zo stapelt Plotly niet meerdere stations op dezelfde richting en
+    # blijven percentages (zowel van totaal als per richting) ≤ 100%.
+    if not facet_per_station:
+        w["station"] = "Alle stations"
+
     c1, c2, c3 = st.columns(3)
     with c1:
         dir_bin = st.selectbox("Richtingsbin (°)", [10, 15, 20, 30, 45], index=3)
@@ -719,7 +725,7 @@ elif page == "Voorspellingsmodel":
     )
     if not missing.empty:
         fig.add_trace(go.Scattermapbox(
-            lat=missing["lat"], lon=missing["lon"], mode="markers",
+            lat=missing["lat"], lon="lon", mode="markers",
             marker=dict(size=14, color="#A0A0A0"), name="Geen voorspelling",
             text=missing["station"], hoverinfo="text"
         ))
@@ -739,4 +745,3 @@ elif page == "Voorspellingsmodel":
         .reset_index(drop=True),
         use_container_width=True
     )
-
