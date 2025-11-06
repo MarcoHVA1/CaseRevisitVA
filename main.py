@@ -270,7 +270,16 @@ if page == "Overzicht":
     agg_df["lat"] = agg_df["station_key"].map(lambda k: STATIONS_META[k]["lat"])
     agg_df["lon"] = agg_df["station_key"].map(lambda k: STATIONS_META[k]["lon"])
 
-    agg_df = agg_df.replace([np.inf, -np.inf], np.nan).dropna(subset=["lat", "lon", map_var])
+    agg_df = agg_df.replace([np.inf, -np.inf], np.nan)
+    # Toon waarschuwing als een station geen waarden heeft voor de gekozen variabele
+    missing_stations = []
+    for sk in STATIONS_META.keys():
+        if sk not in set(agg_df["station_key"]):
+            missing_stations.append(STATIONS_META[sk]["name"])
+    agg_df = agg_df.dropna(subset=["lat", "lon", map_var])
+
+    if missing_stations:
+        st.caption("⚠️ Geen waarde voor gekozen variabele bij: " + ", ".join(missing_stations))
 
     if agg_df.empty:
         st.info("Geen geldige waarden om op de kaart te tonen voor de gekozen filters.")
@@ -347,8 +356,10 @@ elif page == "Temperatuur Trends":
     st.plotly_chart(fig_box, use_container_width=True)
 
     # Gemiddelde temperatuur per seizoen
-    season_temp = df.groupby([("station" if mode == "Vergelijk locaties" else None), "season"].
-                             dropna()).TG_C.mean().reset_index()
+    group_cols = ["season"]
+    if mode == "Vergelijk locaties":
+        group_cols.insert(0, "station")
+    season_temp = df.groupby(group_cols)["TG_C"].mean().reset_index()
     if mode != "Vergelijk locaties":
         season_temp.rename(columns={"TG_C": "Gem_TG_C"}, inplace=True)
         fig_season = px.bar(
@@ -656,7 +667,16 @@ elif page == "Voorspellingsmodel":
 
     # === Eenvoudig lineair model per station ===
     def fit_linear(X, y):
-        X_ = np.column_stack([np.ones(len(X))] + [X[c].values for c in ["RH_mm", "FG_ms", "doy_sin", "doy_cos"]])
+        # Kies dynamisch beschikbare features (fallback: alleen seizoenscomponenten)
+        candidate_features = ["RH_mm", "FG_ms", "doy_sin", "doy_cos"]
+        features = [c for c in candidate_features if c in X.columns and not X[c].isna().all()]
+        # Zorg dat seizoensfeatures er altijd in zitten
+        for c in ["doy_sin", "doy_cos"]:
+            if c not in features and c in X.columns:
+                features.append(c)
+        if not features or len(features) < 2:  # minimaal sin & cos
+            return None
+        X_ = np.column_stack([np.ones(len(X))] + [X[c].values for c in features])
         mask = ~np.isnan(X_).any(axis=1) & ~np.isnan(y.values)
         Xc, yc = X_[mask], y.values[mask]
         if len(yc) < 5:
@@ -668,11 +688,11 @@ elif page == "Voorspellingsmodel":
         ss_res = float(np.sum(resid**2))
         ss_tot = float(np.sum((yc - np.mean(yc))**2))
         r2 = 1 - ss_res / ss_tot if ss_tot > 0 else np.nan
-        return {"beta": beta, "rmse": rmse, "r2": r2, "n": len(yc)}
+        return {"beta": beta, "rmse": rmse, "r2": r2, "n": len(yc), "features": features}
 
     models = {}
     for sk, g in df_all.groupby("station_key"):
-        m = fit_linear(g[["RH_mm", "FG_ms", "doy_sin", "doy_cos"]], g["TG_C"])
+        m = fit_linear(g[[c for c in ["RH_mm", "FG_ms", "doy_sin", "doy_cos"] if c in g.columns]], g["TG_C"])
         if m is not None:
             models[sk] = m
 
@@ -706,8 +726,23 @@ elif page == "Voorspellingsmodel":
     # === Voorspellen per station ===
     rows = []
     for sk, m in models.items():
-        b0, b_rain, b_wind, b_sin, b_cos = m["beta"]
-        pred_temp = b0 + b_rain * pred_rain + b_wind * pred_wind + b_sin * doy_sin + b_cos * doy_cos
+        beta = m["beta"]
+        feats = ["const"] + m.get("features", ["RH_mm", "FG_ms", "doy_sin", "doy_cos"])  # volgorde overeenkomstig fit
+        # Bouw feature vector in dezelfde volgorde
+        feat_values = []
+        for f in feats[1:]:
+            if f == "RH_mm":
+                feat_values.append(pred_rain)
+            elif f == "FG_ms":
+                feat_values.append(pred_wind)
+            elif f == "doy_sin":
+                feat_values.append(doy_sin)
+            elif f == "doy_cos":
+                feat_values.append(doy_cos)
+            else:
+                feat_values.append(0.0)
+        xvec = np.array([1.0] + feat_values)
+        pred_temp = float(xvec @ beta)
         rows.append({
             "station_key": sk,
             "station": STATIONS_META.get(sk, {}).get("name", sk),
