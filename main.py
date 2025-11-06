@@ -564,13 +564,6 @@ elif page == "Correlaties":
                         labels=dict(color="Correlatie"))
         st.plotly_chart(fig, use_container_width=True)
 
-    # Scatter-matrix met mensentaal labels
-    st.subheader("📊 Verken scatter-relaties")
-    df_nice = df.rename(columns=nice)
-    dims = [nice[c] for c in vars_use]
-    sm = px.scatter_matrix(df_nice, dimensions=dims, color=("station" if mode == "Vergelijk locaties" else None), height=700)
-    st.plotly_chart(sm, use_container_width=True)
-
 elif page == "Voorspellingsmodel":
     st.header("🧠 Voorspellingsmodel — verwachte temperatuur per station")
 
