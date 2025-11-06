@@ -535,128 +535,105 @@ elif page == "Windtrends & Topdagen":
         st.info("Geen data beschikbaar voor de gekozen filters.")
         st.stop()
 
-    # Windroos (werkt ook in aggregaatmodus via ruwe rijen)
-    if "FG_ms" in df.columns and "DDVEC" in df.columns:
-        st.subheader("🧭 Interactieve windroos")
+ def render_windrose(df: pd.DataFrame, *, titel="🧭 Interactieve windroos", vergelijk_per_station=False):
+    """
+    df: DataFrame met kolommen DDVEC (graden), FG_ms (m/s) en optioneel station.
+    vergelijk_per_station: True => facet per station (als kolom 'station' bestaat).
+    """
+    st.subheader(titel)
 
-        # Gebruik ruwe rijen bij aggregaatmodus zodat DDVEC behouden blijft
-        w_source = df
-        if mode == "Alle locaties (geaggregeerd)":
-            found = discover_files()
-            all_periods = sorted({p for _, p, _ in found})
-            all_stations = list(STATIONS_META.keys())
-            raw = build_dataset(tuple(all_periods), tuple(all_stations))
-            if not df.empty:
-                dmin, dmax = df["date"].min(), df["date"].max()
-                raw = raw[(raw["date"] >= dmin) & (raw["date"] <= dmax)]
-            w_source = raw
+    # --- Veilig numeriek maken & schoon
+    w = df.copy()
+    if "DDVEC" not in w.columns or "FG_ms" not in w.columns:
+        st.warning("Benodigd: kolommen 'DDVEC' (richting in °) en 'FG_ms' (m/s).")
+        return
 
-        w = w_source[["station", "DDVEC", "FG_ms"]].dropna().copy()
-        w["DDVEC"] = (pd.to_numeric(w["DDVEC"], errors="coerce") % 360).astype(float)
-        w["FG_ms"] = pd.to_numeric(w["FG_ms"], errors="coerce")
-        w = w.dropna()
+    w["DDVEC"] = pd.to_numeric(w["DDVEC"], errors="coerce") % 360
+    w["FG_ms"] = pd.to_numeric(w["FG_ms"], errors="coerce")
+    if "station" not in w.columns:
+        w["station"] = "Alle stations"
+    w = w.dropna(subset=["DDVEC", "FG_ms"])
 
-        if w.empty:
-            st.info("Geen geldige winddata om te tonen.")
-        else:
-            colA, colB, colC = st.columns(3)
-            with colA:
-                dir_bin = st.selectbox("Richtingsbin (°)", [10, 15, 20, 30, 45], index=3)
-            with colB:
-                bins_text = st.text_input("Snelheidsklassen m/s (komma-gescheiden)", value="0,2,4,6,8,10,12,20")
-                try:
-                    speed_bins = sorted({float(x.strip()) for x in bins_text.split(",") if x.strip() != ""})
-                    if len(speed_bins) < 2:
-                        raise ValueError
-                except Exception:
-                    speed_bins = [0, 2, 4, 6, 8, 10, 12, 20]
-                    st.warning("Kon de snelheidsklassen niet parsen; standaard gebruikt.")
-            with colC:
-                normalize = st.selectbox("Normalisatie", ["% van totaal", "% per richting", "Aantal (ruw)"], index=0)
+    if w.empty:
+        st.info("Geen geldige winddata om te tonen.")
+        return
 
-            n_bins = int(360 / dir_bin)
-            sector_idx = ((w["DDVEC"] // dir_bin).astype(int)) % n_bins
-            w["dir_bin_idx"] = sector_idx
-            dir_labels = [f"{k*dir_bin}–{(k+1)*dir_bin}°" for k in range(n_bins)]
-            w["dir_bin"] = w["dir_bin_idx"].map(lambda k: dir_labels[k])
+    # --- UI-controls
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        dir_bin = st.selectbox("Richtingsbin (°)", [10, 15, 20, 30, 45], index=3)
+    with c2:
+        bins_text = st.text_input("Snelheidsklassen m/s (komma-gescheiden)", value="0,2,4,6,8,10,12,20")
+        try:
+            speed_bins = sorted({float(x.strip()) for x in bins_text.split(",") if x.strip() != ""})
+            if len(speed_bins) < 2:
+                raise ValueError
+        except Exception:
+            speed_bins = [0, 2, 4, 6, 8, 10, 12, 20]
+            st.warning("Kon de snelheidsklassen niet parsen; standaard gebruikt.")
+    with c3:
+        normalize = st.selectbox("Normalisatie", ["% van totaal", "% per richting", "Aantal (ruw)"], index=0)
 
-            speed_labels = [f"{speed_bins[i]}–{speed_bins[i+1]} m/s" for i in range(len(speed_bins) - 1)]
-            w["speed_bin"] = pd.cut(w["FG_ms"], bins=speed_bins, labels=speed_labels, include_lowest=True, right=False)
+    # --- Binning richting & snelheid
+    n_bins = int(360 / dir_bin)
+    sector_idx = (np.floor(w["DDVEC"] / dir_bin).astype(int)) % n_bins
+    w["dir_bin_idx"] = sector_idx
+    dir_labels = [f"{k*dir_bin}–{(k+1)*dir_bin}°" for k in range(n_bins)]
+    w["dir_bin"] = w["dir_bin_idx"].map(lambda k: dir_labels[k])
 
-            agg = (
-                w.dropna(subset=["dir_bin", "speed_bin"])
-                .groupby(["station", "dir_bin_idx", "dir_bin", "speed_bin"], as_index=False)
-                .size()
-                .rename(columns={"size": "count"})
-            )
+    speed_labels = [f"{speed_bins[i]}–{speed_bins[i+1]} m/s" for i in range(len(speed_bins) - 1)]
+    w["speed_bin"] = pd.cut(w["FG_ms"], bins=speed_bins, labels=speed_labels, include_lowest=True, right=False)
 
-            if agg.empty:
-                st.info("Geen data binnen de gekozen bins.")
-            else:
-                if normalize == "% van totaal":
-                    total = agg.groupby("station")["count"].transform("sum")
-                    agg["value"] = np.where(total > 0, 100.0 * agg["count"] / total, 0.0)
-                    r_title, tick_suffix = "Frequentie (%)", "%"
-                elif normalize == "% per richting":
-                    dir_tot = agg.groupby(["station", "dir_bin_idx"])["count"].transform("sum")
-                    agg["value"] = np.where(dir_tot > 0, 100.0 * agg["count"] / dir_tot, 0.0)
-                    r_title, tick_suffix = "Aandeel binnen richting (%)", "%"
-                else:
-                    agg["value"] = agg["count"]
-                    r_title, tick_suffix = "Aantal", ""
+    agg = (
+        w.dropna(subset=["dir_bin", "speed_bin"])
+         .groupby(["station", "dir_bin_idx", "dir_bin", "speed_bin"], as_index=False)
+         .size()
+         .rename(columns={"size": "count"})
+    )
+    if agg.empty:
+        st.info("Geen data binnen de gekozen bins.")
+        return
 
-                agg = agg.sort_values(["station", "dir_bin_idx"]).reset_index(drop=True)
-                fig_windrose = px.bar_polar(
-                    agg,
-                    r="value",
-                    theta="dir_bin",
-                    color="speed_bin",
-                    barmode="stack",
-                    facet_row=("station" if mode == "Vergelijk locaties" else None),
-                    hover_data={"count": True, "value": True, "dir_bin_idx": False},
-                )
-                fig_windrose.update_layout(
-                    polar=dict(
-                        angularaxis=dict(direction="clockwise", rotation=90, categoryorder="array", categoryarray=dir_labels),
-                        radialaxis=dict(title=r_title, ticksuffix=tick_suffix),
-                    ),
-                    margin=dict(l=0, r=0, t=40, b=0),
-                    legend_title_text="Snelheid (m/s)",
-                )
-                st.plotly_chart(fig_windrose, use_container_width=True)
+    # --- Normalisatie
+    if normalize == "% van totaal":
+        total = agg.groupby("station")["count"].transform("sum")
+        agg["value"] = np.where(total > 0, 100.0 * agg["count"] / total, 0.0)
+        r_title, tick_suffix = "Frequentie (%)", "%"
+    elif normalize == "% per richting":
+        dir_tot = agg.groupby(["station", "dir_bin_idx"])["count"].transform("sum")
+        agg["value"] = np.where(dir_tot > 0, 100.0 * agg["count"] / dir_tot, 0.0)
+        r_title, tick_suffix = "Aandeel binnen richting (%)", "%"
+    else:
+        agg["value"] = agg["count"]
+        r_title, tick_suffix = "Aantal", ""
 
-    # Boxplot windsnelheid per seizoen
-    if "FG_ms" in df.columns and "date" in df.columns:
-        st.subheader("📦 Verdeling van windsnelheid per seizoen")
+    agg = agg.sort_values(["station", "dir_bin_idx"]).reset_index(drop=True)
 
-        def get_season_name(date):
-            m = date.month
-            if m in [3, 4, 5]:
-                return "Lente"
-            elif m in [6, 7, 8]:
-                return "Zomer"
-            elif m in [9, 10, 11]:
-                return "Herfst"
-            else:
-                return "Winter"
-
-        df["season_box"] = df["date"].apply(get_season_name)
-        season_order = ["Lente", "Zomer", "Herfst", "Winter"]
-
-        fig_box_w = px.box(
-            df,
-            x="season_box",
-            y="FG_ms",
-            color=("station" if mode == "Vergelijk locaties" else "season_box"),
-            category_orders={"season_box": season_order},
-            points="all",
-            title="📦 Verdeling windsnelheid per seizoen",
-            labels={"season_box": "Seizoen", "FG_ms": "Gemiddelde windsnelheid (m/s)"},
-        )
-        fig_box_w.update_traces(line_width=3)
-        fig_box_w.update_layout(title_x=0.5, boxmode="group")
-        st.plotly_chart(fig_box_w, use_container_width=True)
-
+    # --- Plot
+    facets = {"facet_row": "station"} if vergelijk_per_station and "station" in agg.columns and agg["station"].nunique() > 1 else {}
+    fig = px.bar_polar(
+        agg,
+        r="value",
+        theta="dir_bin",
+        color="speed_bin",
+        barmode="stack",
+        hover_data={"count": True, "value": True, "dir_bin_idx": False},
+        **facets
+    )
+    fig.update_layout(
+        polar=dict(
+            angularaxis=dict(
+                direction="clockwise",
+                rotation=90,
+                categoryorder="array",
+                categoryarray=dir_labels
+            ),
+            radialaxis=dict(title=r_title, ticksuffix=tick_suffix)
+        ),
+        margin=dict(l=0, r=0, t=40, b=0),
+        legend_title_text="Snelheid (m/s)"
+    )
+    st.plotly_chart(fig, use_container_width=True)
 
 # ---------------------------------------------------------------------
 # PAGE 5: Correlaties
