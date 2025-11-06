@@ -150,10 +150,10 @@ def selection_controls(key_prefix: str = ""):
         keep_cols = ["date"] + num_cols
         g = (
             df_all[keep_cols + ["station"]]
-                .groupby("date", as_index=False)
-                .agg({c: "mean" for c in num_cols})
+              .groupby("date", as_index=False)
+              .agg({c: "mean" for c in num_cols})
         )
-        # herstel datumfeatures zodat downstream groupby's niet falen
+        # Herstel afgeleide datumvelden (maand/season) voor downstream groupby's
         g["month"] = g["date"].dt.month
         def _season(m):
             return (
@@ -195,7 +195,6 @@ all_station_keys_kpi = list(STATIONS_META.keys())
 df_kpi = build_dataset(tuple(all_periods_kpi), tuple(all_station_keys_kpi))
 
 if df_kpi.empty:
-    # Fallback: hanteer lege KPIs
     avg_temp = total_rain = total_sun = None
 else:
     avg_temp = df_kpi.get("TG_C").mean().round(1) if "TG_C" in df_kpi else None
@@ -211,19 +210,18 @@ if total_sun is not None:
     kpi3.metric("☀️ Totale Zonuren", total_sun)
 
 # -----------------------------------------------------------------------------
-# PAGE 1: Overzicht (ongewijzigde logica maar altijd alle JSON's + periodekeuze)
+# PAGE 1: Overzicht
 # -----------------------------------------------------------------------------
 if page == "Overzicht":
     st.header("🗺️ Interactieve kaart • Temperatuur, Neerslag & Zonuren")
-    st.caption("Kies jaarperiodes en variabelen. De kaart toont waarden per KNMI-station; onderaan zie je de correlatie tussen twee variabelen.")
+    st.caption("Kies jaarperiodes en variabelen. De kaart toont waarden per KNMI-station. Stations zonder data worden grijs getoond (incl. IJmuiden).")
 
-    # 1) JSON-bestanden detecteren
     found = discover_files()
     if not found:
         st.warning("Geen JSON-data gevonden.")
         st.stop()
 
-    # 2) Filters (jaarperiodes bovenaan de pagina)
+    # Filters
     all_periods = sorted({p for _, p, _ in found})
     sel_periods = st.multiselect("📅 Kies jaarperiodes:", all_periods, default=all_periods, key="ov_periods")
 
@@ -244,7 +242,7 @@ if page == "Overzicht":
     agg_choice = colC.radio("Aggregatie", ["Gemiddelde", "Som"], horizontal=True)
     agg_func = "mean" if agg_choice == "Gemiddelde" else "sum"
 
-    # 3) Data samenvoegen
+    # Data samenvoegen
     frames = []
     for station_key, period, path_str in found:
         if period not in sel_periods:
@@ -263,83 +261,79 @@ if page == "Overzicht":
 
     df_all = pd.concat(frames, ignore_index=True)
 
-    # Maandfilter
     if sel_month != "Alle":
         month_idx = month_names.index(sel_month)
         df_all = df_all[df_all["date"].dt.month == month_idx]
 
-    # Numeriek maken
     for c in ["TG_C", "RH_mm", "SQ_h"]:
         if c in df_all.columns:
             df_all[c] = pd.to_numeric(df_all[c], errors="coerce")
 
-    # Aggregatie per station
     agg_df = (
         df_all.groupby(["station_key", "station"], as_index=False)
         .agg({map_var: agg_func, "TG_C": "mean", "RH_mm": "sum", "SQ_h": "sum"})
     )
 
-    # Coördinaten
     agg_df["lat"] = agg_df["station_key"].map(lambda k: STATIONS_META[k]["lat"])
     agg_df["lon"] = agg_df["station_key"].map(lambda k: STATIONS_META[k]["lon"])
 
     agg_df = agg_df.replace([np.inf, -np.inf], np.nan)
 
-        # Maak een volledige stationslijst (zodat IJmuiden altijd zichtbaar is)
-        stations_full = pd.DataFrame([
-            {"station_key": k, "station": v["name"], "lat": v["lat"], "lon": v["lon"]}
-            for k, v in STATIONS_META.items()
-        ])
-        agg_df = stations_full.merge(agg_df, on=["station_key", "station", "lat", "lon"], how="left")
+    # Maak een volledige stationslijst (zodat IJmuiden altijd zichtbaar is)
+    stations_full = pd.DataFrame([
+        {"station_key": k, "station": v["name"], "lat": v["lat"], "lon": v["lon"]}
+        for k, v in STATIONS_META.items()
+    ])
+    agg_df = stations_full.merge(agg_df, on=["station_key", "station", "lat", "lon"], how="left")
 
-        # Splits valid/missing per kaartvariabele
-        valid = agg_df.dropna(subset=[map_var]).copy()
-        missing = agg_df[agg_df[map_var].isna()].copy()
+    # Splits valid/missing per kaartvariabele
+    valid = agg_df.dropna(subset=[map_var]).copy()
+    missing = agg_df[agg_df[map_var].isna()].copy()
 
-        color_scale = "RdYlBu_r" if map_var == "TG_C" else ("Blues" if map_var == "RH_mm" else "YlOrBr")
-        map_title = {"TG_C": "Temperatuur (°C)", "RH_mm": "Neerslag (mm)", "SQ_h": "Zonuren (h)"}[map_var]
+    color_scale = "RdYlBu_r" if map_var == "TG_C" else ("Blues" if map_var == "RH_mm" else "YlOrBr")
+    map_title = {"TG_C": "Temperatuur (°C)", "RH_mm": "Neerslag (mm)", "SQ_h": "Zonuren (h)"}[map_var]
 
-        if valid.empty and missing.empty:
-            st.info("Geen geldige waarden om op de kaart te tonen voor de gekozen filters.")
-        else:
-            size_kwargs = {}
-            if not valid.empty and (valid[map_var] >= 0).all():
-                size_kwargs = {"size": map_var, "size_max": 28}
+    if valid.empty and missing.empty:
+        st.info("Geen geldige waarden om op de kaart te tonen voor de gekozen filters.")
+    else:
+        size_kwargs = {}
+        if not valid.empty and (valid[map_var] >= 0).all():
+            size_kwargs = {"size": map_var, "size_max": 28}
 
-            fig_map = px.scatter_mapbox(
-                valid if not valid.empty else agg_df,
-                lat="lat",
-                lon="lon",
-                color=(map_var if not valid.empty else None),
-                hover_name="station",
-                hover_data={"lat": False, "lon": False, "TG_C": True, "RH_mm": True, "SQ_h": True},
-                color_continuous_scale=(color_scale if not valid.empty else None),
-                zoom=6,
-                height=520,
-                **({} if valid.empty else size_kwargs)
-            )
-            # Grijze markers voor stations zonder waarde (incl. IJmuiden)
-            if not missing.empty:
-                fig_map.add_trace(
-                    go.Scattermapbox(
-                        lat=missing["lat"],
-                        lon=missing["lon"],
-                        mode="markers",
-                        marker=dict(size=14, color="#A0A0A0"),
-                        name="Geen data",
-                        text=missing["station"],
-                        hoverinfo="text",
-                    )
+        fig_map = px.scatter_mapbox(
+            valid if not valid.empty else agg_df,
+            lat="lat",
+            lon="lon",
+            color=(map_var if not valid.empty else None),
+            hover_name="station",
+            hover_data={"lat": False, "lon": False, "TG_C": True, "RH_mm": True, "SQ_h": True},
+            color_continuous_scale=(color_scale if not valid.empty else None),
+            zoom=6,
+            height=520,
+            **({} if valid.empty else size_kwargs)
+        )
+        # Grijze markers voor stations zonder waarde (incl. IJmuiden)
+        if not missing.empty:
+            fig_map.add_trace(
+                go.Scattermapbox(
+                    lat=missing["lat"],
+                    lon=missing["lon"],
+                    mode="markers",
+                    marker=dict(size=14, color="#A0A0A0"),
+                    name="Geen data",
+                    text=missing["station"],
+                    hoverinfo="text",
                 )
-            fig_map.update_layout(
-                mapbox_style="open-street-map",
-                margin=dict(l=0, r=0, t=10, b=0),
-                coloraxis_colorbar=dict(title=map_title),
             )
-            st.plotly_chart(fig_map, use_container_width=True)
+        fig_map.update_layout(
+            mapbox_style="open-street-map",
+            margin=dict(l=0, r=0, t=10, b=0),
+            coloraxis_colorbar=dict(title=map_title),
+        )
+        st.plotly_chart(fig_map, use_container_width=True)
 
 # -----------------------------------------------------------------------------
-# PAGE 2: Temperatuur Trends (+ heatmap toegevoegd + locatie/vergelijk/alle + periode)
+# PAGE 2: Temperatuur Trends
 # -----------------------------------------------------------------------------
 elif page == "Temperatuur Trends":
     st.header("🌡️ Temperatuur Trends")
@@ -378,512 +372,4 @@ elif page == "Temperatuur Trends":
             "July", "August", "September", "October", "November", "December"
         ]},
         title="📦 Verdeling van gemiddelde temperatuur per maand",
-        labels={"month_name": "Maand", "TG_C": "Gemiddelde temperatuur (°C)"}
-    )
-    fig_box.update_traces(line_width=2)
-    st.plotly_chart(fig_box, use_container_width=True)
-
-    # Gemiddelde temperatuur per seizoen
-    group_cols = ["season"]
-    if mode == "Vergelijk locaties":
-        group_cols.insert(0, "station")
-    season_temp = df.groupby(group_cols)["TG_C"].mean().reset_index()
-    if mode != "Vergelijk locaties":
-        season_temp.rename(columns={"TG_C": "Gem_TG_C"}, inplace=True)
-        fig_season = px.bar(
-            season_temp, x="season", y="Gem_TG_C", color="season",
-            title="🌦️ Gemiddelde temperatuur per seizoen",
-            labels={"season": "Seizoen", "Gem_TG_C": "Gemiddelde Temp (°C)"}
-        )
-    else:
-        season_temp.rename(columns={"TG_C": "Gem_TG_C"}, inplace=True)
-        fig_season = px.bar(
-            season_temp, x="season", y="Gem_TG_C", color="station", barmode="group",
-            title="🌦️ Gemiddelde temperatuur per seizoen (per station)",
-            labels={"season": "Seizoen", "Gem_TG_C": "Gemiddelde Temp (°C)", "station": "Station"}
-        )
-    st.plotly_chart(fig_season, use_container_width=True)
-
-    # 📅 Kalender-heatmap (verplaatst vanuit Windtrends & Topdagen)
-    st.subheader("📅 Kalender-heatmap: gemiddelde temperatuur per dag")
-    # Voor vergelijken tonen we tabs per station
-    if mode == "Vergelijk locaties":
-        tabs = st.tabs(sorted(df["station"].unique()))
-        for tab, st_name in zip(tabs, sorted(df["station"].unique())):
-            with tab:
-                d = df[df["station"] == st_name].copy()
-                d["day"] = d["date"].dt.day
-                d["month"] = d["date"].dt.month
-                pivot = d.pivot_table(index="month", columns="day", values="TG_C", aggfunc="mean")
-                month_names_map = {
-                    1: "Januari", 2: "Februari", 3: "Maart", 4: "April",
-                    5: "Mei", 6: "Juni", 7: "Juli", 8: "Augustus",
-                    9: "September", 10: "Oktober", 11: "November", 12: "December"
-                }
-                pivot.index = pivot.index.map(month_names_map)
-                fig_heatmap = px.imshow(
-                    pivot, color_continuous_scale="RdBu_r", origin="upper", aspect="auto",
-                    labels=dict(color="Temperatuur (°C)", x="Dag van de maand", y="Maand")
-                )
-                fig_heatmap.update_xaxes(title="Dag van de maand", tickmode="linear")
-                fig_heatmap.update_yaxes(title="Maand", tickmode="array",
-                                         tickvals=list(pivot.index), ticktext=list(pivot.index))
-                st.plotly_chart(fig_heatmap, use_container_width=True)
-    else:
-        d = df.copy()
-        d["day"] = d["date"].dt.day
-        d["month"] = d["date"].dt.month
-        pivot = d.pivot_table(index="month", columns="day", values="TG_C", aggfunc="mean")
-        month_names_map = {
-            1: "Januari", 2: "Februari", 3: "Maart", 4: "April",
-            5: "Mei", 6: "Juni", 7: "Juli", 8: "Augustus",
-            9: "September", 10: "Oktober", 11: "November", 12: "December"
-        }
-        pivot.index = pivot.index.map(month_names_map)
-        fig_heatmap = px.imshow(
-            pivot, color_continuous_scale="RdBu_r", origin="upper", aspect="auto",
-            labels=dict(color="Temperatuur (°C)", x="Dag van de maand", y="Maand")
-        )
-        fig_heatmap.update_xaxes(title="Dag van de maand", tickmode="linear")
-        fig_heatmap.update_yaxes(title="Maand", tickmode="array",
-                                 tickvals=list(pivot.index), ticktext=list(pivot.index))
-        st.plotly_chart(fig_heatmap, use_container_width=True)
-
-# -----------------------------------------------------------------------------
-# PAGE 3: Neerslag & Zon (met locatie/vergelijk/alle + periode)
-# -----------------------------------------------------------------------------
-elif page == "Neerslag & Zon":
-    st.header("☔ Neerslag vs. Zon")
-    df, mode = selection_controls(key_prefix="rain_sun")
-    if df.empty:
-        st.info("Geen data beschikbaar voor de gekozen filters.")
-        st.stop()
-
-    if "RH_mm" in df.columns and "SQ_h" in df.columns:
-        bins = [0, 1, 5, 10, 50]
-        labels = ["0 mm", "0–5 mm", "5–10 mm", "10+ mm"]
-        df["rain_cat"] = pd.cut(df["RH_mm"], bins=bins, labels=labels, include_lowest=True)
-        ordered_cats = ["0 mm", "0–5 mm", "5–10 mm", "10+ mm"]
-        df["rain_cat"] = pd.Categorical(df["rain_cat"], categories=ordered_cats, ordered=True)
-
-        fig_box = px.box(
-            df, x="rain_cat", y="SQ_h",
-            color=("station" if mode == "Vergelijk locaties" else "rain_cat"),
-            category_orders={"rain_cat": ordered_cats},
-            title="📦 Verdeling zonuren per neerslagcategorie",
-            labels={"SQ_h": "Zonuren", "rain_cat": "Neerslagcategorie"},
-            points="all"
-        )
-        st.plotly_chart(fig_box, use_container_width=True)
-
-        # Gemiddelde temperatuur bij toenemende regenval
-        rain_bins = pd.cut(
-            df["RH_mm"], bins=[0, 1, 5, 10, 20, 50], include_lowest=True,
-            labels=["0–1 mm", "1–5 mm", "5–10 mm", "10–20 mm", "20+ mm"]
-        )
-        rain_bins.name = "RH_mm"
-        avg_temp_rain = df.groupby([rain_bins] + (["station"] if mode == "Vergelijk locaties" else []))["TG_C"].mean().reset_index()
-
-        fig_temp_rain = px.bar(
-            avg_temp_rain, x="RH_mm", y="TG_C",
-            color=("station" if mode == "Vergelijk locaties" else None),
-            barmode=("group" if mode == "Vergelijk locaties" else "relative"),
-            title="🌧️ Gemiddelde temperatuur bij toenemende regenval",
-            labels={"RH_mm": "Neerslagcategorie (mm per dag)", "TG_C": "Gemiddelde temperatuur (°C)", "station": "Station"},
-            text_auto=".1f"
-        )
-        fig_temp_rain.update_layout(showlegend=True)
-        st.plotly_chart(fig_temp_rain, use_container_width=True)
-
-# -----------------------------------------------------------------------------
-# PAGE 4: Windtrends & Topdagen (met locatie/vergelijk/alle + periode)
-# -----------------------------------------------------------------------------
-elif page == "Windtrends & Topdagen":
-    st.header("📊 Windtrends & Topdagen")
-    df, mode = selection_controls(key_prefix="wind")
-    if df.empty:
-        st.info("Geen data beschikbaar voor de gekozen filters.")
-        st.stop()
-
-    # 🧭 Interactieve windroos
-    if "FG_ms" in df.columns and "DDVEC" in df.columns:
-        st.subheader("🧭 Interactieve windroos")
-        # Gebruik ruwe rijen voor windroos; aggregatie verwijdert DDVEC
-        w_source = df
-        if mode == "Alle locaties (geaggregeerd)":
-            found_raw = discover_files()
-            all_periods_raw = sorted({p for _, p, _ in found_raw})
-            all_stations_raw = list(STATIONS_META.keys())
-            raw = build_dataset(tuple(all_periods_raw), tuple(all_stations_raw))
-            if not df.empty:
-                dmin, dmax = df["date"].min(), df["date"].max()
-                raw = raw[(raw["date"] >= dmin) & (raw["date"] <= dmax)]
-            w_source = raw
-        w = w_source[["station", "DDVEC", "FG_ms"]].dropna().copy()
-        w["DDVEC"] = pd.to_numeric(w["DDVEC"], errors="coerce") % 360
-        w["FG_ms"] = pd.to_numeric(w["FG_ms"], errors="coerce")
-        w = w.dropna()
-        if w.empty:
-            st.info("Geen geldige winddata om te tonen.")
-        else:
-            colA, colB, colC = st.columns(3)
-            with colA:
-                dir_bin = st.selectbox("Richtingsbin (°)", [10, 15, 20, 30, 45], index=3)
-            with colB:
-                bins_text = st.text_input("Snelheidsklassen m/s (komma-gescheiden)", value="0,2,4,6,8,10,12,20")
-                try:
-                    speed_bins = sorted({float(x.strip()) for x in bins_text.split(",") if x.strip() != ""})
-                    if len(speed_bins) < 2:
-                        raise ValueError
-                except Exception:
-                    speed_bins = [0, 2, 4, 6, 8, 10, 12, 20]
-                    st.warning("Kon de snelheidsklassen niet parsen; standaard gebruikt.")
-            with colC:
-                normalize = st.selectbox("Normalisatie", ["% van totaal", "% per richting", "Aantal (ruw)"], index=0)
-
-            n_bins = int(360 / dir_bin)
-            sector_idx = ((w["DDVEC"] // dir_bin).astype(int)) % n_bins
-            w["dir_bin_idx"] = sector_idx
-            dir_labels = [f"{k*dir_bin}–{(k+1)*dir_bin}°" for k in range(n_bins)]
-            w["dir_bin"] = w["dir_bin_idx"].map(lambda k: dir_labels[k])
-
-            speed_labels = [f"{speed_bins[i]}–{speed_bins[i+1]} m/s" for i in range(len(speed_bins)-1)]
-            w["speed_bin"] = pd.cut(w["FG_ms"], bins=speed_bins, labels=speed_labels, include_lowest=True, right=False)
-
-            agg = (
-                w.dropna(subset=["dir_bin", "speed_bin"]) \
-                 .groupby(["station", "dir_bin_idx", "dir_bin", "speed_bin"], as_index=False) \
-                 .size() \
-                 .rename(columns={"size": "count"})
-            )
-
-            if agg.empty:
-                st.info("Geen data binnen de gekozen bins.")
-            else:
-                if normalize == "% van totaal":
-                    total = agg.groupby("station")["count"].transform("sum")
-                    agg["value"] = np.where(total > 0, 100.0 * agg["count"] / total, 0.0)
-                    r_title, tick_suffix = "Frequentie (%)", "%"
-                elif normalize == "% per richting":
-                    dir_tot = agg.groupby(["station", "dir_bin_idx"])["count"].transform("sum")
-                    agg["value"] = np.where(dir_tot > 0, 100.0 * agg["count"] / dir_tot, 0.0)
-                    r_title, tick_suffix = "Aandeel binnen richting (%)", "%"
-                else:
-                    agg["value"] = agg["count"]
-                    r_title, tick_suffix = "Aantal", ""
-
-                agg = agg.sort_values(["station", "dir_bin_idx"]).reset_index(drop=True)
-
-                fig_windrose = px.bar_polar(
-                    agg,
-                    r="value",
-                    theta="dir_bin",
-                    color="speed_bin",
-                    barmode="stack",
-                    facet_row=("station" if mode == "Vergelijk locaties" else None),
-                    hover_data={"count": True, "value": True, "dir_bin_idx": False}
-                )
-                fig_windrose.update_layout(
-                    polar=dict(
-                        angularaxis=dict(direction="clockwise", rotation=90, categoryorder="array", categoryarray=dir_labels),
-                        radialaxis=dict(title=r_title, ticksuffix=tick_suffix)
-                    ),
-                    margin=dict(l=0, r=0, t=40, b=0),
-                    legend_title_text="Snelheid (m/s)"
-                )
-                st.plotly_chart(fig_windrose, use_container_width=True)
-
-    # Boxplot windsnelheid per seizoen
-    if "FG_ms" in df.columns and "date" in df.columns:
-        st.subheader("📦 Verdeling van windsnelheid per seizoen")
-        def get_season(date):
-            m = date.month
-            if m in [3, 4, 5]:
-                return "Lente"
-            elif m in [6, 7, 8]:
-                return "Zomer"
-            elif m in [9, 10, 11]:
-                return "Herfst"
-            else:
-                return "Winter"
-        df["season_box"] = df["date"].apply(get_season)
-        season_order = ["Lente", "Zomer", "Herfst", "Winter"]
-        fig_box = px.box(
-            df,
-            x="season_box",
-            y="FG_ms",
-            color=("station" if mode == "Vergelijk locaties" else "season_box"),
-            category_orders={"season_box": season_order},
-            points="all"
-        )
-        fig_box.update_traces(line_width=3)
-        fig_box.update_layout(
-            title="📦 Verdeling windsnelheid per seizoen",
-            xaxis_title="Seizoen",
-            yaxis_title="Gemiddelde windsnelheid (m/s)",
-            title_x=0.5,
-            boxmode="group"
-        )
-        st.plotly_chart(fig_box, use_container_width=True)
-
-# -----------------------------------------------------------------------------
-# PAGE 5: Correlaties (NIEUW)
-# -----------------------------------------------------------------------------
-elif page == "Correlaties":
-    st.header("🔗 Correlaties tussen variabelen")
-    df, mode = selection_controls(key_prefix="corr")
-    if df.empty:
-        st.info("Geen data beschikbaar voor de gekozen filters.")
-        st.stop()
-
-    vars_use = [c for c in ["TN_C", "TG_C", "TX_C", "RH_mm", "SQ_h", "FG_ms"] if c in df.columns]
-    if not vars_use:
-        st.info("Geen geschikte variabelen gevonden voor correlatie.")
-        st.stop()
-
-    # Correlatiematrix (Pearson)
-    st.subheader("📐 Correlatiematrix (Pearson)")
-    if mode == "Vergelijk locaties":
-        tabs = st.tabs(sorted(df["station"].unique()))
-        for tab, st_name in zip(tabs, sorted(df["station"].unique())):
-            with tab:
-                cdf = df[df["station"] == st_name][vars_use]
-                corr = cdf.corr().round(2)
-                fig = px.imshow(corr, text_auto=True, aspect="auto", origin="upper")
-                st.plotly_chart(fig, use_container_width=True)
-    else:
-        corr = df[vars_use].corr().round(2)
-        fig = px.imshow(corr, text_auto=True, aspect="auto", origin="upper")
-        st.plotly_chart(fig, use_container_width=True)
-
-    # Scatter-matrix
-    st.subheader("📊 Scatter matrix")
-    sm = px.scatter_matrix(df, dimensions=vars_use, color=("station" if mode == "Vergelijk locaties" else None), height=700)
-    st.plotly_chart(sm, use_container_width=True)
-
-# -----------------------------------------------------------------------------
-# PAGE 6: Voorspellingsmodel (inclusief IJmuiden)
-# -----------------------------------------------------------------------------
-elif page == "Voorspellingsmodel":
-    st.header("🧠 Voorspellingsmodel — voorspelde temperatuur in Nederland")
-    st.caption("Pas **maand**, **dag**, **neerslag** en **windsnelheid** aan. Het model voorspelt de **temperatuur (°C)** per station op basis van historische patronen. Alle stations incl. IJmuiden worden automatisch meegenomen.")
-
-    # === Alle JSON-bestanden automatisch inlezen ===
-    found = discover_files()
-    if not found:
-        st.warning("Geen JSON-data gevonden (bijv. 'ijmuiden_2023_2024.json').")
-        st.stop()
-
-    # Periodekeuze bovenaan
-    all_periods = sorted({p for _, p, _ in found})
-    sel_periods = st.multiselect("📅 Kies jaarperiodes:", all_periods, default=all_periods, key="model_periods")
-
-    # === Alle stations samenvoegen ===
-    frames = []
-    for station_key, period, path_str in found:
-        if period not in sel_periods:
-            continue
-        dfp = load_data(path_str)
-        if "date" not in dfp.columns:
-            continue
-        for c in ["TG_C", "RH_mm", "FG_ms"]:
-            if c not in dfp.columns:
-                dfp[c] = np.nan
-            dfp[c] = pd.to_numeric(dfp[c], errors="coerce")
-        dfp["station_key"] = station_key
-        dfp["station"] = STATIONS_META[station_key]["name"]
-        frames.append(dfp)
-
-    df_all = pd.concat(frames, ignore_index=True)
-    df_all = df_all.dropna(subset=["TG_C"]).copy()
-
-    # === Datumfeatures (dag van jaar → sin/cos) ===
-    df_all["doy"] = df_all["date"].dt.dayofyear
-    df_all["doy"] = df_all["doy"].fillna(df_all["doy"].median())
-    df_all["doy_sin"] = np.sin(2 * np.pi * df_all["doy"] / 366.0)
-    df_all["doy_cos"] = np.cos(2 * np.pi * df_all["doy"] / 366.0)
-
-    # === Eenvoudig lineair model per station ===
-    def fit_linear(X, y):
-        # Kies dynamisch beschikbare features (fallback: alleen seizoenscomponenten)
-        candidate_features = ["RH_mm", "FG_ms", "doy_sin", "doy_cos"]
-        features = [c for c in candidate_features if c in X.columns and not X[c].isna().all()]
-        # Zorg dat seizoensfeatures er altijd in zitten
-        for c in ["doy_sin", "doy_cos"]:
-            if c not in features and c in X.columns:
-                features.append(c)
-        if not features or len(features) < 2:  # minimaal sin & cos
-            return None
-        X_ = np.column_stack([np.ones(len(X))] + [X[c].values for c in features])
-        mask = ~np.isnan(X_).any(axis=1) & ~np.isnan(y.values)
-        Xc, yc = X_[mask], y.values[mask]
-        if len(yc) < 5:
-            return None
-        beta, *_ = np.linalg.lstsq(Xc, yc, rcond=None)
-        yhat = Xc @ beta
-        resid = yc - yhat
-        rmse = float(np.sqrt(np.mean(resid**2)))
-        ss_res = float(np.sum(resid**2))
-        ss_tot = float(np.sum((yc - np.mean(yc))**2))
-        r2 = 1 - ss_res / ss_tot if ss_tot > 0 else np.nan
-        return {"beta": beta, "rmse": rmse, "r2": r2, "n": len(yc), "features": features}
-
-    models = {}
-    for sk, g in df_all.groupby("station_key"):
-        m = fit_linear(g[[c for c in ["RH_mm", "FG_ms", "doy_sin", "doy_cos"] if c in g.columns]], g["TG_C"])
-        if m is not None:
-            models[sk] = m
-
-    if not models:
-        st.info("Onvoldoende data om een stationmodel te trainen.")
-        st.stop()
-
-    # === Gebruikersinvoer ===
-    import calendar
-    st.subheader("⚙️ Stel je omstandigheden in")
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        maand = st.slider("📆 Maand", 1, 12, 7)
-        max_dag = calendar.monthrange(2024, maand)[1]
-        dag = st.slider("📅 Dag", 1, int(max_dag), min(15, max_dag))
-    with col2:
-        pred_rain = st.slider("🌧️ Neerslag (mm/dag)", 0.0, 50.0, 0.0, 0.5)
-    with col3:
-        pred_wind = st.slider("💨 Windsnelheid (m/s)", 0.0, 15.0, 3.0, 0.5)
-
-    # === Valideer dag en maand ===
-    try:
-        selected_date = pd.Timestamp(year=2024, month=int(maand), day=int(dag))
-        doy = selected_date.dayofyear
-        doy_sin = float(np.sin(2 * np.pi * doy / 366.0))
-        doy_cos = float(np.cos(2 * np.pi * doy / 366.0))
-    except ValueError:
-        st.error(f"❌ Ongeldige datum: {dag} / {maand}. Controleer of deze dag in de gekozen maand voorkomt.")
-        st.stop()
-
-    # === Voorspellen per station ===
-    rows = []
-    for sk, m in models.items():
-        beta = m["beta"]
-        feats = ["const"] + m.get("features", ["RH_mm", "FG_ms", "doy_sin", "doy_cos"])  # volgorde overeenkomstig fit
-        # Bouw feature vector in dezelfde volgorde
-        feat_values = []
-        for f in feats[1:]:
-            if f == "RH_mm":
-                feat_values.append(pred_rain)
-            elif f == "FG_ms":
-                feat_values.append(pred_wind)
-            elif f == "doy_sin":
-                feat_values.append(doy_sin)
-            elif f == "doy_cos":
-                feat_values.append(doy_cos)
-            else:
-                feat_values.append(0.0)
-        xvec = np.array([1.0] + feat_values)
-        pred_temp = float(xvec @ beta)
-        rows.append({
-            "station_key": sk,
-            "station": STATIONS_META.get(sk, {}).get("name", sk),
-            "lat": STATIONS_META.get(sk, {}).get("lat", np.nan),
-            "lon": STATIONS_META.get(sk, {}).get("lon", np.nan),
-            "pred_TG_C": float(pred_temp),
-            "r2": m["r2"],
-            "rmse": m["rmse"],
-            "n": m["n"]
-        })
-
-    pred_df = pd.DataFrame(rows).replace([np.inf, -np.inf], np.nan)
-
-    # === Kaart (ZWART-WIT) met voorspelde temperatuur ===
-    st.subheader("🗺️ Voorspelde temperatuur per station (°C)")
-    # Toon ALLE stations (incl. IJmuiden), ook zonder voorspelling (grijs)
-    stations_full = pd.DataFrame([
-        {"station_key": k, "station": v["name"], "lat": v["lat"], "lon": v["lon"]}
-        for k, v in STATIONS_META.items()
-    ])
-    plot_df = stations_full.merge(pred_df, on=["station_key", "station", "lat", "lon"], how="left")
-
-    valid = plot_df.dropna(subset=["pred_TG_C"]).copy()
-    missing = plot_df[plot_df["pred_TG_C"].isna()].copy()
-
-    if valid.empty and missing.empty:
-        st.info("Geen geldige stations om te tonen.")
-    else:
-        if not valid.empty:
-            if valid["pred_TG_C"].max() > valid["pred_TG_C"].min():
-                valid["size"] = (valid["pred_TG_C"] - valid["pred_TG_C"].min()) / (
-                    valid["pred_TG_C"].max() - valid["pred_TG_C"].min()
-                )
-            else:
-                valid["size"] = 0.5
-            valid["size"] = (valid["size"] * 25) + 6
-
-        TEMP_SCALE_MIN = -5.0
-        TEMP_SCALE_MAX = 30.0
-
-        fig = px.scatter_mapbox(
-            valid if not valid.empty else plot_df,
-            lat="lat",
-            lon="lon",
-            color=("pred_TG_C" if not valid.empty else None),
-            size=("size" if not valid.empty else None),
-            color_continuous_scale=("RdYlBu_r" if not valid.empty else None),
-            range_color=([TEMP_SCALE_MIN, TEMP_SCALE_MAX] if not valid.empty else None),
-            zoom=6,
-            hover_name="station",
-            hover_data={
-                "pred_TG_C": True,
-                "r2": True,
-                "rmse": True,
-                "n": True,
-                "lat": False,
-                "lon": False,
-                "size": False
-            },
-            height=520
-        )
-        if not missing.empty:
-            fig.add_trace(
-                go.Scattermapbox(
-                    lat=missing["lat"],
-                    lon=missing["lon"],
-                    mode="markers",
-                    marker=dict(size=14, color="#A0A0A0"),
-                    name="Geen voorspelling",
-                    text=missing["station"],
-                    hoverinfo="text",
-                )
-            )
-        fig.update_layout(
-            mapbox_style="carto-darkmatter",
-            margin=dict(l=0, r=0, t=10, b=0),
-            coloraxis_colorbar=dict(
-                title="Voorspelde temperatuur",
-                ticksuffix="°C",
-                tickmode="auto"
-            )
-        )
-        st.plotly_chart(fig, use_container_width=True)
-
-        # === Tabel: voorspelde temperatuur (°C) ===
-        st.subheader("📄 Tabel: voorspelde temperatuur (°C)")
-        temp_tbl = (
-            pred_df[["station", "pred_TG_C"]]
-            .rename(columns={"station": "Station", "pred_TG_C": "Voorspelde Temp (°C)"})
-            .assign(**{"Voorspelde Temp (°C)": lambda d: d["Voorspelde Temp (°C)"].round(1)})
-            .sort_values("Voorspelde Temp (°C)", ascending=False)
-            .reset_index(drop=True)
-        )
-        st.dataframe(temp_tbl, use_container_width=True)
-
-        # === Samenvatting over alle stations ===
-        st.subheader("📈 Gemiddelde modelprestatie in Nederland")
-        avg_temp = pred_df["pred_TG_C"].mean()
-        avg_r2 = pred_df["r2"].mean()
-        avg_rmse = pred_df["rmse"].mean()
-        summary_df = pd.DataFrame([{
-            "Gem. voorspelde temperatuur (°C)": round(avg_temp, 1),
-            "Gem. R² (verklaarde variantie)": round(avg_r2, 2),
-            "Gem. standaardafwijking (°C)": round(avg_rmse, 1)
-        }])
-        st.table(summary_df)
+        labels={"month_name": "Maand", "TG_C": "Gemiddelde
