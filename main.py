@@ -59,15 +59,6 @@ page = st.sidebar.radio(
     ["Overzicht", "Temperatuur Trends", "Neerslag & Zon", "Windtrends & Topdagen"]
 )
 
-# === KPI-tegels ===
-avg_temp = df["TG_C"].mean().round(1) if "TG_C" in df else None
-total_rain = df["RH_mm"].sum().round(1) if "RH_mm" in df else None
-total_sun = df["SQ_h"].sum().round(1) if "SQ_h" in df else None
-
-kpi1, kpi2, kpi3 = st.columns(3)
-if avg_temp: kpi1.metric("🌡️ Gemiddelde Temp (°C)", avg_temp)
-if total_rain: kpi2.metric("🌧️ Totale Neerslag (mm)", total_rain)
-if total_sun: kpi3.metric("☀️ Totale Zonuren", total_sun)
 
 # === Pagina's ===if page == "Overzicht":
 if page == "Overzicht":
