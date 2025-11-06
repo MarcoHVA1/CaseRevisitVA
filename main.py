@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.express as px
+import plotly.graph_objects as go
 
 # === App-config ===
 st.set_page_config(page_title="Weer Dashboard NL", layout="wide")
@@ -147,9 +148,21 @@ def selection_controls(key_prefix: str = ""):
     if mode == "Alle locaties (geaggregeerd)" and not df_all.empty:
         num_cols = [c for c in ["TN_C", "TG_C", "TX_C", "RH_mm", "SQ_h", "FG_ms"] if c in df_all.columns]
         keep_cols = ["date"] + num_cols
-        g = (df_all[keep_cols + ["station"]]
+        g = (
+            df_all[keep_cols + ["station"]]
                 .groupby("date", as_index=False)
-                .agg({c: "mean" for c in num_cols}))
+                .agg({c: "mean" for c in num_cols})
+        )
+        # herstel datumfeatures zodat downstream groupby's niet falen
+        g["month"] = g["date"].dt.month
+        def _season(m):
+            return (
+                "winter" if m in [12, 1, 2]
+                else "lente" if m in [3, 4, 5]
+                else "zomer" if m in [6, 7, 8]
+                else "herfst"
+            )
+        g["season"] = g["month"].apply(_season)
         g["station"] = "Alle stations"
         g["station_key"] = "all"
         g["period"] = ", ".join(sel_periods)
@@ -271,44 +284,59 @@ if page == "Overzicht":
     agg_df["lon"] = agg_df["station_key"].map(lambda k: STATIONS_META[k]["lon"])
 
     agg_df = agg_df.replace([np.inf, -np.inf], np.nan)
-    # Toon waarschuwing als een station geen waarden heeft voor de gekozen variabele
-    missing_stations = []
-    for sk in STATIONS_META.keys():
-        if sk not in set(agg_df["station_key"]):
-            missing_stations.append(STATIONS_META[sk]["name"])
-    agg_df = agg_df.dropna(subset=["lat", "lon", map_var])
 
-    if missing_stations:
-        st.caption("⚠️ Geen waarde voor gekozen variabele bij: " + ", ".join(missing_stations))
+        # Maak een volledige stationslijst (zodat IJmuiden altijd zichtbaar is)
+        stations_full = pd.DataFrame([
+            {"station_key": k, "station": v["name"], "lat": v["lat"], "lon": v["lon"]}
+            for k, v in STATIONS_META.items()
+        ])
+        agg_df = stations_full.merge(agg_df, on=["station_key", "station", "lat", "lon"], how="left")
 
-    if agg_df.empty:
-        st.info("Geen geldige waarden om op de kaart te tonen voor de gekozen filters.")
-    else:
+        # Splits valid/missing per kaartvariabele
+        valid = agg_df.dropna(subset=[map_var]).copy()
+        missing = agg_df[agg_df[map_var].isna()].copy()
+
         color_scale = "RdYlBu_r" if map_var == "TG_C" else ("Blues" if map_var == "RH_mm" else "YlOrBr")
         map_title = {"TG_C": "Temperatuur (°C)", "RH_mm": "Neerslag (mm)", "SQ_h": "Zonuren (h)"}[map_var]
 
-        size_kwargs = {}
-        if (agg_df[map_var] >= 0).all():
-            size_kwargs = {"size": map_var, "size_max": 28}
+        if valid.empty and missing.empty:
+            st.info("Geen geldige waarden om op de kaart te tonen voor de gekozen filters.")
+        else:
+            size_kwargs = {}
+            if not valid.empty and (valid[map_var] >= 0).all():
+                size_kwargs = {"size": map_var, "size_max": 28}
 
-        fig_map = px.scatter_mapbox(
-            agg_df,
-            lat="lat",
-            lon="lon",
-            color=map_var,
-            hover_name="station",
-            hover_data={"lat": False, "lon": False, "TG_C": True, "RH_mm": True, "SQ_h": True},
-            color_continuous_scale=color_scale,
-            zoom=6,
-            height=520,
-            **size_kwargs
-        )
-        fig_map.update_layout(
-            mapbox_style="open-street-map",
-            margin=dict(l=0, r=0, t=10, b=0),
-            coloraxis_colorbar=dict(title=map_title),
-        )
-        st.plotly_chart(fig_map, use_container_width=True)
+            fig_map = px.scatter_mapbox(
+                valid if not valid.empty else agg_df,
+                lat="lat",
+                lon="lon",
+                color=(map_var if not valid.empty else None),
+                hover_name="station",
+                hover_data={"lat": False, "lon": False, "TG_C": True, "RH_mm": True, "SQ_h": True},
+                color_continuous_scale=(color_scale if not valid.empty else None),
+                zoom=6,
+                height=520,
+                **({} if valid.empty else size_kwargs)
+            )
+            # Grijze markers voor stations zonder waarde (incl. IJmuiden)
+            if not missing.empty:
+                fig_map.add_trace(
+                    go.Scattermapbox(
+                        lat=missing["lat"],
+                        lon=missing["lon"],
+                        mode="markers",
+                        marker=dict(size=14, color="#A0A0A0"),
+                        name="Geen data",
+                        text=missing["station"],
+                        hoverinfo="text",
+                    )
+                )
+            fig_map.update_layout(
+                mapbox_style="open-street-map",
+                margin=dict(l=0, r=0, t=10, b=0),
+                coloraxis_colorbar=dict(title=map_title),
+            )
+            st.plotly_chart(fig_map, use_container_width=True)
 
 # -----------------------------------------------------------------------------
 # PAGE 2: Temperatuur Trends (+ heatmap toegevoegd + locatie/vergelijk/alle + periode)
@@ -453,8 +481,8 @@ elif page == "Neerslag & Zon":
             df["RH_mm"], bins=[0, 1, 5, 10, 20, 50], include_lowest=True,
             labels=["0–1 mm", "1–5 mm", "5–10 mm", "10–20 mm", "20+ mm"]
         )
-        avg_temp_rain = df.groupby([rain_bins] + (["station"] if mode == "Vergelijk locaties" else []) )["TG_C"].mean().reset_index()
-        avg_temp_rain.rename(columns={"RH_mm": "Neerslag"}, inplace=True)
+        rain_bins.name = "RH_mm"
+        avg_temp_rain = df.groupby([rain_bins] + (["station"] if mode == "Vergelijk locaties" else []))["TG_C"].mean().reset_index()
 
         fig_temp_rain = px.bar(
             avg_temp_rain, x="RH_mm", y="TG_C",
@@ -462,8 +490,7 @@ elif page == "Neerslag & Zon":
             barmode=("group" if mode == "Vergelijk locaties" else "relative"),
             title="🌧️ Gemiddelde temperatuur bij toenemende regenval",
             labels={"RH_mm": "Neerslagcategorie (mm per dag)", "TG_C": "Gemiddelde temperatuur (°C)", "station": "Station"},
-            text_auto=".1f",
-            color_continuous_scale="RdYlBu_r"
+            text_auto=".1f"
         )
         fig_temp_rain.update_layout(showlegend=True)
         st.plotly_chart(fig_temp_rain, use_container_width=True)
@@ -481,7 +508,18 @@ elif page == "Windtrends & Topdagen":
     # 🧭 Interactieve windroos
     if "FG_ms" in df.columns and "DDVEC" in df.columns:
         st.subheader("🧭 Interactieve windroos")
-        w = df[["station", "DDVEC", "FG_ms"]].dropna().copy()
+        # Gebruik ruwe rijen voor windroos; aggregatie verwijdert DDVEC
+        w_source = df
+        if mode == "Alle locaties (geaggregeerd)":
+            found_raw = discover_files()
+            all_periods_raw = sorted({p for _, p, _ in found_raw})
+            all_stations_raw = list(STATIONS_META.keys())
+            raw = build_dataset(tuple(all_periods_raw), tuple(all_stations_raw))
+            if not df.empty:
+                dmin, dmax = df["date"].min(), df["date"].max()
+                raw = raw[(raw["date"] >= dmin) & (raw["date"] <= dmax)]
+            w_source = raw
+        w = w_source[["station", "DDVEC", "FG_ms"]].dropna().copy()
         w["DDVEC"] = pd.to_numeric(w["DDVEC"], errors="coerce") % 360
         w["FG_ms"] = pd.to_numeric(w["FG_ms"], errors="coerce")
         w = w.dropna()
@@ -758,29 +796,39 @@ elif page == "Voorspellingsmodel":
 
     # === Kaart (ZWART-WIT) met voorspelde temperatuur ===
     st.subheader("🗺️ Voorspelde temperatuur per station (°C)")
-    plot_df = pred_df.dropna(subset=["lat", "lon", "pred_TG_C"]).copy()
-    if plot_df.empty:
+    # Toon ALLE stations (incl. IJmuiden), ook zonder voorspelling (grijs)
+    stations_full = pd.DataFrame([
+        {"station_key": k, "station": v["name"], "lat": v["lat"], "lon": v["lon"]}
+        for k, v in STATIONS_META.items()
+    ])
+    plot_df = stations_full.merge(pred_df, on=["station_key", "station", "lat", "lon"], how="left")
+
+    valid = plot_df.dropna(subset=["pred_TG_C"]).copy()
+    missing = plot_df[plot_df["pred_TG_C"].isna()].copy()
+
+    if valid.empty and missing.empty:
         st.info("Geen geldige stations om te tonen.")
     else:
-        if plot_df["pred_TG_C"].max() > plot_df["pred_TG_C"].min():
-            plot_df["size"] = (plot_df["pred_TG_C"] - plot_df["pred_TG_C"].min()) / (
-                plot_df["pred_TG_C"].max() - plot_df["pred_TG_C"].min()
-            )
-        else:
-            plot_df["size"] = 0.5
-        plot_df["size"] = (plot_df["size"] * 25) + 6
+        if not valid.empty:
+            if valid["pred_TG_C"].max() > valid["pred_TG_C"].min():
+                valid["size"] = (valid["pred_TG_C"] - valid["pred_TG_C"].min()) / (
+                    valid["pred_TG_C"].max() - valid["pred_TG_C"].min()
+                )
+            else:
+                valid["size"] = 0.5
+            valid["size"] = (valid["size"] * 25) + 6
 
         TEMP_SCALE_MIN = -5.0
         TEMP_SCALE_MAX = 30.0
 
         fig = px.scatter_mapbox(
-            plot_df,
+            valid if not valid.empty else plot_df,
             lat="lat",
             lon="lon",
-            color="pred_TG_C",
-            size="size",
-            color_continuous_scale="RdYlBu_r",
-            range_color=[TEMP_SCALE_MIN, TEMP_SCALE_MAX],
+            color=("pred_TG_C" if not valid.empty else None),
+            size=("size" if not valid.empty else None),
+            color_continuous_scale=("RdYlBu_r" if not valid.empty else None),
+            range_color=([TEMP_SCALE_MIN, TEMP_SCALE_MAX] if not valid.empty else None),
             zoom=6,
             hover_name="station",
             hover_data={
@@ -794,6 +842,18 @@ elif page == "Voorspellingsmodel":
             },
             height=520
         )
+        if not missing.empty:
+            fig.add_trace(
+                go.Scattermapbox(
+                    lat=missing["lat"],
+                    lon=missing["lon"],
+                    mode="markers",
+                    marker=dict(size=14, color="#A0A0A0"),
+                    name="Geen voorspelling",
+                    text=missing["station"],
+                    hoverinfo="text",
+                )
+            )
         fig.update_layout(
             mapbox_style="carto-darkmatter",
             margin=dict(l=0, r=0, t=10, b=0),
