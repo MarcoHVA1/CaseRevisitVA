@@ -64,7 +64,18 @@ def load_data(path: str) -> pd.DataFrame:
 
     return df
 
+# Stations die we willen uitsluiten
+EXCLUDED_STATIONS = {"ijmuiden"}
 
+STATIONS_META = {
+    "amsterdam":  {"name": "Amsterdam",  "lat": 52.3676, "lon": 4.9041},
+    "de_bilt":    {"name": "De Bilt",    "lat": 52.1010, "lon": 5.1790},
+    "eelde":      {"name": "Eelde",      "lat": 53.1250, "lon": 6.5833},
+    "eindhoven":  {"name": "Eindhoven",  "lat": 51.4500, "lon": 5.3740},
+    "maastricht": {"name": "Maastricht", "lat": 50.8510, "lon": 5.6910},
+    "twente":     {"name": "Twente",     "lat": 52.2700, "lon": 6.9000},
+    "vlissingen": {"name": "Vlissingen", "lat": 51.4420, "lon": 3.5730},
+}
 STATIONS_META = {
     "amsterdam":  {"name": "Amsterdam",  "lat": 52.3676, "lon": 4.9041},
     "de_bilt":    {"name": "De Bilt",    "lat": 52.1010, "lon": 5.1790},
