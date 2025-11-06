@@ -175,8 +175,12 @@ page = st.sidebar.radio(
 # -----------------------------------------------------------------------------
 # KPI-tegels (op basis van alle data die aanwezig is)
 # -----------------------------------------------------------------------------
-# Gebruik alle bestanden en reken gemiddelde KPI's over alle stations
-df_kpi, _ = selection_controls.__wrapped__(key_prefix="kpi_preview")  # call undecorated to avoid UI here
+# Gebruik alle bestanden en reken gemiddelde KPI's over alle stations (zonder UI-calls)
+found_kpi = discover_files()
+all_periods_kpi = sorted({p for _, p, _ in found_kpi})
+all_station_keys_kpi = list(STATIONS_META.keys())
+df_kpi = build_dataset(tuple(all_periods_kpi), tuple(all_station_keys_kpi))
+
 if df_kpi.empty:
     # Fallback: hanteer lege KPIs
     avg_temp = total_rain = total_sun = None
