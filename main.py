@@ -76,6 +76,7 @@ STATIONS_META = {
 
 @st.cache_data
 def discover_files():
+    """Zoek alle JSON-bestanden per station/jaartal (incl. IJmuiden)."""
     files = sorted(Path(".").glob("*.json"))
     pat = re.compile(
         r"^(amsterdam|de_bilt|eelde|eindhoven|ijmuiden|maastricht|twente|vlissingen)_(\d{4}_\d{4})\.json$",
@@ -92,6 +93,7 @@ def discover_files():
 
 @st.cache_data
 def build_dataset(selected_periods: tuple, selected_stations: tuple):
+    """Bouw één DataFrame vanuit de gekozen jaarperiodes + stations."""
     found = discover_files()
     frames = []
     for station_key, period, path_str in found:
@@ -119,6 +121,7 @@ def build_dataset(selected_periods: tuple, selected_stations: tuple):
 
 
 def selection_controls(key_prefix: str = ""):
+    """UI: jaarperiodes + locatiemodus per pagina."""
     found = discover_files()
     all_periods = sorted({p for _, p, _ in found})
     all_station_keys = list(STATIONS_META.keys())
@@ -152,14 +155,14 @@ def selection_controls(key_prefix: str = ""):
         stations = st.multiselect(
             "Stations",
             options=all_station_keys,
-            default=["amsterdam", "ijmuiden"],
+            default=["amsterdam", "ijmuiden"],  # IJmuiden standaard mee
             format_func=lambda k: STATIONS_META[k]["name"],
             key=f"{key_prefix}_multi"
         )
         if not stations:
             st.warning("Kies minimaal één station.")
     else:
-        stations = all_station_keys
+        stations = all_station_keys  # alle stations (incl. IJmuiden)
 
     df_all = build_dataset(tuple(sel_periods), tuple(stations))
 
@@ -210,7 +213,7 @@ page = st.sidebar.radio(
 
 
 # ---------------------------------------------------------------------
-# KPI-tegels op basis van alle data
+# KPI's over alle data
 # ---------------------------------------------------------------------
 _found_kpi = discover_files()
 _all_periods_kpi = sorted({p for _, p, _ in _found_kpi})
@@ -518,7 +521,7 @@ elif page == "Neerslag & Zon":
 
 
 # ---------------------------------------------------------------------
-# PAGE 4: Windtrends & Topdagen
+# PAGE 4: Windtrends & Topdagen (incl. windroos)
 # ---------------------------------------------------------------------
 elif page == "Windtrends & Topdagen":
     st.header("📊 Windtrends & Topdagen")
@@ -527,7 +530,7 @@ elif page == "Windtrends & Topdagen":
         st.info("Geen data beschikbaar voor de gekozen filters.")
         st.stop()
 
-    # Windroos (gebruik ruwe rijen bij aggregaatmodus)
+    # Windroos (werkt ook in aggregaatmodus via ruwe rijen)
     if "FG_ms" in df.columns and "DDVEC" in df.columns:
         st.subheader("🧭 Interactieve windroos")
 
@@ -812,9 +815,8 @@ elif page == "Voorspellingsmodel":
 
     pred_df = pd.DataFrame(rows).replace([np.inf, -np.inf], np.nan)
 
-    # Kaart met voorspelde temperatuur — ALTIJD alle stations tonen
+    # Kaart — ALTIJD alle stations tonen (incl. IJmuiden)
     st.subheader("🗺️ Voorspelde temperatuur per station (°C)")
-
     stations_full = pd.DataFrame([
         {"station_key": k, "station": v["name"], "lat": v["lat"], "lon": v["lon"]}
         for k, v in STATIONS_META.items()
