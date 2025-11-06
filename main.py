@@ -288,21 +288,6 @@ page = st.sidebar.radio(
 )
 
 # =========================================================
-# KPI's globaal
-# =========================================================
-_all = build_dataset(tuple(sorted({p for _, p, _ in discover_files()})), tuple(STATIONS_META.keys()))
-k1, k2, k3 = st.columns(3)
-if not _all.empty:
-    k1.metric("🌡️ Gemiddelde temperatuur", f"{_all['TG_C'].mean():.1f} °C" if "TG_C" in _all else "—")
-    k2.metric("🌧️ Totale neerslag", f"{_all['RH_mm'].sum():.1f} mm" if "RH_mm" in _all else "—")
-    k3.metric("☀️ Totale zonuren", f"{_all['SQ_h'].sum():.1f} uur" if "SQ_h" in _all else "—")
-else:
-    k1.metric("🌡️ Gemiddelde temperatuur", "—")
-    k2.metric("🌧️ Totale neerslag", "—")
-    k3.metric("☀️ Totale zonuren", "—")
-
-
-# =========================================================
 # Pagina's
 # =========================================================
 if page == "Overzicht":
@@ -321,10 +306,6 @@ if page == "Overzicht":
     cA, cB, cC = st.columns(3)
     sel_month = cA.selectbox("📆 Maand", month_names)
 
-    map_var = cB.selectbox(
-        "🗺️ Variabele",
-        ["TG_C", "RH_mm", "SQ_h"],
-        format_func=lambda k: {"TG_C": "🌡️ Temperatuur (°C)", "RH_mm": "🌧️ Neerslag (mm)", "SQ_h": "☀️ Zonuren (uur)"}[k],
     )
     agg_choice = cC.radio("Aggregatie", ["Gemiddelde", "Som"], horizontal=True)
     agg_func = "mean" if agg_choice == "Gemiddelde" else "sum"
