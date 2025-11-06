@@ -8,13 +8,18 @@ import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
 
-# === App-config ===
+# =========================================================
+# App-config
+# =========================================================
 st.set_page_config(page_title="Weer Dashboard NL", layout="wide")
 
+# Stations die we expliciet willen uitsluiten (zoals gevraagd)
+EXCLUDED_STATIONS = {"ijmuiden"}  # IJmuiden volledig verwijderen uit alle data
 
-# ---------------------------------------------------------------------
+
+# =========================================================
 # Data helpers
-# ---------------------------------------------------------------------
+# =========================================================
 @st.cache_data
 def load_data(path: str):
     with open(path, "r", encoding="utf-8") as f:
@@ -29,7 +34,7 @@ def load_data(path: str):
         except Exception:
             df["date"] = pd.to_datetime(df["date"].astype(str), format="%Y%m%d", errors="coerce")
 
-    # Geschaalde velden (KNMI tienden)
+    # KNMI schaalfactoren (tienden)
     def make_scaled(src, dest, divisor=10):
         if src in df.columns:
             df[dest] = pd.to_numeric(df[src], errors="coerce") / divisor
@@ -46,7 +51,7 @@ def load_data(path: str):
     if "DDVEC" in df.columns:
         df["DDVEC"] = pd.to_numeric(df["DDVEC"], errors="coerce")
 
-    # Afgeleide datumvelden
+    # Afgeleide datumfeatures
     if "date" in df.columns:
         df["year"] = df["date"].dt.year
         df["month"] = df["date"].dt.month
@@ -64,6 +69,7 @@ def load_data(path: str):
     return df
 
 
+# Station metadata (IJmuiden laten we staan voor volledigheid, maar we filteren later)
 STATIONS_META = {
     "amsterdam":  {"name": "Amsterdam",  "lat": 52.3676, "lon": 4.9041},
     "de_bilt":    {"name": "De Bilt",    "lat": 52.1010, "lon": 5.1790},
@@ -79,8 +85,8 @@ STATIONS_META = {
 @st.cache_data
 def discover_files():
     """
-    Zoek alle JSON-bestanden per station/jaartal (case-insensitive),
-    o.a. Ijmuiden_2021_2022.json, Ijmuiden_2022_2023.json, Ijmuiden_2023_2024.json
+    Zoek alle JSON-bestanden per station/jaartal (case-insensitive).
+    Voorbeeld: Amsterdam_2023_2024.json, Ijmuiden_2022_2023.json
     """
     files = sorted(Path(".").glob("*.json"))
     pat = re.compile(
@@ -91,14 +97,17 @@ def discover_files():
     for f in files:
         m = pat.match(f.name)
         if m:
-            station_key, period = m.group(1).lower(), m.group(2)
-            found.append((station_key, period, str(f)))
+            skey = m.group(1).lower()
+            if skey in EXCLUDED_STATIONS:
+                continue  # IJmuiden eruit
+            period = m.group(2)
+            found.append((skey, period, str(f)))
     return found
 
 
 @st.cache_data
 def build_dataset(selected_periods: tuple, selected_stations: tuple):
-    """Bouw één DataFrame vanuit de gekozen jaarperiodes + stations."""
+    """Bouw één DataFrame vanuit de gekozen jaarperiodes + stations (excl. IJmuiden)."""
     found = discover_files()
     frames = []
     for station_key, period, path_str in found:
@@ -126,10 +135,10 @@ def build_dataset(selected_periods: tuple, selected_stations: tuple):
 
 
 def selection_controls(key_prefix: str = ""):
-    """UI: jaarperiodes + locatiemodus per pagina."""
+    """UI: jaarperiodes + locatiemodus per pagina (zonder IJmuiden)."""
     found = discover_files()
     all_periods = sorted({p for _, p, _ in found})
-    all_station_keys = list(STATIONS_META.keys())
+    all_station_keys = [k for k in STATIONS_META.keys() if k not in EXCLUDED_STATIONS]
 
     st.subheader("⚙️ Filters")
     col1, col2 = st.columns([2, 3])
@@ -157,17 +166,18 @@ def selection_controls(key_prefix: str = ""):
         )
         stations = [station]
     elif mode == "Vergelijk locaties":
+        default_list = [x for x in ["amsterdam", "de_bilt"] if x in all_station_keys]
         stations = st.multiselect(
             "Stations",
             options=all_station_keys,
-            default=["amsterdam", "ijmuiden"],  # IJmuiden standaard mee
+            default=default_list if default_list else all_station_keys[:2],
             format_func=lambda k: STATIONS_META[k]["name"],
             key=f"{key_prefix}_multi"
         )
         if not stations:
             st.warning("Kies minimaal één station.")
     else:
-        stations = all_station_keys  # alle stations (incl. IJmuiden)
+        stations = all_station_keys  # alle stations (excl. IJmuiden)
 
     df_all = build_dataset(tuple(sel_periods), tuple(stations))
 
@@ -180,7 +190,7 @@ def selection_controls(key_prefix: str = ""):
             .groupby("date", as_index=False)
             .agg({c: "mean" for c in num_cols})
         )
-        # Herstel datumfeatures voor downstream groupby's
+        # Datumfeatures herstellen
         g["month"] = g["date"].dt.month
 
         def _season(m):
@@ -200,9 +210,9 @@ def selection_controls(key_prefix: str = ""):
     return df_all, mode
 
 
-# ---------------------------------------------------------------------
-# Windroos component (netjes ingesprongen, 4 spaties)
-# ---------------------------------------------------------------------
+# =========================================================
+# Windroos component
+# =========================================================
 def render_windrose(df: pd.DataFrame, *, titel="🧭 Windroos", vergelijk_per_station=False):
     """
     df: DataFrame met kolommen DDVEC (graden), FG_ms (m/s) en optioneel 'station'.
@@ -210,7 +220,7 @@ def render_windrose(df: pd.DataFrame, *, titel="🧭 Windroos", vergelijk_per_st
     st.subheader(titel)
 
     if "DDVEC" not in df.columns or "FG_ms" not in df.columns:
-        st.warning("Benodigd: kolommen 'DDVEC' (richting in °) en 'FG_ms' (m/s).")
+        st.warning("Windroos niet mogelijk: kolommen 'DDVEC' en/of 'FG_ms' ontbreken in de selectie.")
         return
 
     w = df.copy()
@@ -240,7 +250,7 @@ def render_windrose(df: pd.DataFrame, *, titel="🧭 Windroos", vergelijk_per_st
     with c3:
         normalize = st.selectbox("Normalisatie", ["% van totaal", "% per richting", "Aantal (ruw)"], index=0)
 
-    # Binning richting & snelheid
+    # Binning
     n_bins = int(360 / dir_bin)
     sector_idx = (np.floor(w["DDVEC"] / dir_bin).astype(int)) % n_bins
     w["dir_bin_idx"] = sector_idx
@@ -303,9 +313,9 @@ def render_windrose(df: pd.DataFrame, *, titel="🧭 Windroos", vergelijk_per_st
     st.plotly_chart(fig, use_container_width=True)
 
 
-# ---------------------------------------------------------------------
+# =========================================================
 # Sidebar (navigation ONLY)
-# ---------------------------------------------------------------------
+# =========================================================
 st.sidebar.title("Navigatie")
 page = st.sidebar.radio(
     "Ga naar",
@@ -320,12 +330,12 @@ page = st.sidebar.radio(
 )
 
 
-# ---------------------------------------------------------------------
-# KPI's over alle data
-# ---------------------------------------------------------------------
+# =========================================================
+# KPI's over alle data (excl. IJmuiden)
+# =========================================================
 _found_kpi = discover_files()
 _all_periods_kpi = sorted({p for _, p, _ in _found_kpi})
-_all_station_keys_kpi = list(STATIONS_META.keys())
+_all_station_keys_kpi = [k for k in STATIONS_META if k not in EXCLUDED_STATIONS]
 df_kpi = build_dataset(tuple(_all_periods_kpi), tuple(_all_station_keys_kpi))
 
 kpi1, kpi2, kpi3 = st.columns(3)
@@ -339,12 +349,12 @@ else:
     kpi3.metric("☀️ Totale Zonuren", "—")
 
 
-# ---------------------------------------------------------------------
-# PAGE 1: Overzicht
-# ---------------------------------------------------------------------
+# =========================================================
+# PAGE 1: Overzicht (IJmuiden uitgesloten)
+# =========================================================
 if page == "Overzicht":
     st.header("🗺️ Overzicht — Kaart met temperatuur, neerslag en zonuren")
-    st.caption("Kies jaarperiodes en variabelen. Stations zonder waarde worden grijs getoond (incl. IJmuiden).")
+    st.caption("Kies jaarperiodes en variabelen. IJmuiden is verwijderd uit alle data.")
 
     found = discover_files()
     if not found:
@@ -405,10 +415,10 @@ if page == "Overzicht":
     agg_df["lat"] = agg_df["station_key"].map(lambda k: STATIONS_META[k]["lat"])
     agg_df["lon"] = agg_df["station_key"].map(lambda k: STATIONS_META[k]["lon"])
 
-    # Toon altijd alle stations (incl. IJmuiden)
+    # Toon alleen stations die NIET uitgesloten zijn
     stations_full = pd.DataFrame([
         {"station_key": k, "station": v["name"], "lat": v["lat"], "lon": v["lon"]}
-        for k, v in STATIONS_META.items()
+        for k, v in STATIONS_META.items() if k not in EXCLUDED_STATIONS
     ])
     agg_df = stations_full.merge(agg_df, on=["station_key", "station", "lat", "lon"], how="left")
 
@@ -457,11 +467,11 @@ if page == "Overzicht":
         st.plotly_chart(fig_map, use_container_width=True)
 
 
-# ---------------------------------------------------------------------
-# PAGE 2: Temperatuur Trends
-# ---------------------------------------------------------------------
+# =========================================================
+# PAGE 2: Temperatuur Trends — Dag → Maand → Seizoen
+# =========================================================
 elif page == "Temperatuur Trends":
-    st.header("🌡️ Temperatuur Trends — tijdreeksen, verdelingen en heatmap")
+    st.header("🌡️ Temperatuur Trends — dag • maand • seizoen")
     df, mode = selection_controls(key_prefix="temp")
     if df.empty or "date" not in df.columns:
         st.info("Geen data beschikbaar voor de gekozen filters.")
@@ -480,7 +490,7 @@ elif page == "Temperatuur Trends":
 
         df["season"] = df["month"].apply(_season)
 
-    # Lijnplot min/gem/max
+    # --- DAG: tijdreeks min/gem/max
     use_cols = [c for c in ["TN_C", "TG_C", "TX_C"] if c in df.columns]
     if use_cols:
         label_map = {"TN_C": "Min", "TG_C": "Gem", "TX_C": "Max"}
@@ -489,10 +499,7 @@ elif page == "Temperatuur Trends":
         temp = df[["date", "station"] + use_cols].melt(["date", "station"], var_name="type", value_name="temp_C")
         temp["type"] = temp["type"].replace(label_map)
 
-        facet_args = {}
-        if mode == "Vergelijk locaties":
-            facet_args = {"facet_row": "station"}
-
+        facet_args = {"facet_row": "station"} if mode == "Vergelijk locaties" else {}
         fig = px.line(
             temp, x="date", y="temp_C", color="type", **facet_args,
             labels={"temp_C": "Temperatuur (°C)", "date": "Datum", "type": "Reeks"},
@@ -500,7 +507,7 @@ elif page == "Temperatuur Trends":
         )
         st.plotly_chart(fig, use_container_width=True)
 
-    # Boxplot temperatuur per maand
+    # --- MAAND: verdeling
     dft = df.copy()
     dft["month_name"] = dft["date"].dt.month_name()
     fig_box = px.box(
@@ -516,7 +523,7 @@ elif page == "Temperatuur Trends":
     fig_box.update_traces(line_width=2)
     st.plotly_chart(fig_box, use_container_width=True)
 
-    # Gemiddelde temperatuur per seizoen
+    # --- SEIZOEN: gemiddelde
     group_cols = ["season"]
     if mode == "Vergelijk locaties":
         group_cols.insert(0, "station")
@@ -537,50 +544,10 @@ elif page == "Temperatuur Trends":
         )
     st.plotly_chart(fig_season, use_container_width=True)
 
-    # Kalender-heatmap TG_C per dag
-    st.subheader("📅 Kalender-heatmap — gemiddelde temperatuur per dag")
 
-    def heatmap_from(df_in: pd.DataFrame):
-        d = df_in.copy()
-        d["day"] = d["date"].dt.day
-        d["month"] = d["date"].dt.month
-        pivot = d.pivot_table(index="month", columns="day", values="TG_C", aggfunc="mean")
-
-        month_names_map = {
-            1: "Januari", 2: "Februari", 3: "Maart", 4: "April",
-            5: "Mei", 6: "Juni", 7: "Juli", 8: "Augustus",
-            9: "September", 10: "Oktober", 11: "November", 12: "December",
-        }
-        pivot.index = pivot.index.map(month_names_map)
-
-        fig_heatmap = px.imshow(
-            pivot,
-            color_continuous_scale="RdBu_r",
-            origin="upper",
-            aspect="auto",
-            labels=dict(color="Temperatuur (°C)", x="Dag van de maand", y="Maand"),
-        )
-        fig_heatmap.update_xaxes(title="Dag van de maand", tickmode="linear")
-        fig_heatmap.update_yaxes(
-            title="Maand",
-            tickmode="array",
-            tickvals=list(pivot.index),
-            ticktext=list(pivot.index),
-        )
-        return fig_heatmap
-
-    if mode == "Vergelijk locaties":
-        tabs = st.tabs(sorted(df["station"].unique()))
-        for tab, st_name in zip(tabs, sorted(df["station"].unique())):
-            with tab:
-                st.plotly_chart(heatmap_from(df[df["station"] == st_name]), use_container_width=True)
-    else:
-        st.plotly_chart(heatmap_from(df), use_container_width=True)
-
-
-# ---------------------------------------------------------------------
+# =========================================================
 # PAGE 3: Neerslag & Zon
-# ---------------------------------------------------------------------
+# =========================================================
 elif page == "Neerslag & Zon":
     st.header("☔ Neerslag & Zon — relaties en verdelingen")
     df, mode = selection_controls(key_prefix="rain_sun")
@@ -622,9 +589,9 @@ elif page == "Neerslag & Zon":
         st.plotly_chart(fig_temp_rain, use_container_width=True)
 
 
-# ---------------------------------------------------------------------
+# =========================================================
 # PAGE 4: Windtrends & Topdagen (incl. windroos)
-# ---------------------------------------------------------------------
+# =========================================================
 elif page == "Windtrends & Topdagen":
     st.header("💨 Windtrends & Topdagen — windroos en verdelingen")
     df, mode = selection_controls(key_prefix="wind")
@@ -632,14 +599,13 @@ elif page == "Windtrends & Topdagen":
         st.info("Geen data beschikbaar voor de gekozen filters.")
         st.stop()
 
-    # Windroos
+    # Windroos: in aggregaatmodus ruwe rijen herladen in dezelfde periode
     if "FG_ms" in df.columns and "DDVEC" in df.columns:
-        # In aggregaatmodus de ruwe rijen herladen in dezelfde periode
         w_source = df
         if mode == "Alle locaties (geaggregeerd)":
             found = discover_files()
             all_periods = sorted({p for _, p, _ in found})
-            all_stations = list(STATIONS_META.keys())
+            all_stations = [k for k in STATIONS_META if k not in EXCLUDED_STATIONS]
             raw = build_dataset(tuple(all_periods), tuple(all_stations))
             if not df.empty and "date" in df.columns:
                 dmin, dmax = df["date"].min(), df["date"].max()
@@ -683,9 +649,9 @@ elif page == "Windtrends & Topdagen":
         st.plotly_chart(fig_box_w, use_container_width=True)
 
 
-# ---------------------------------------------------------------------
+# =========================================================
 # PAGE 5: Correlaties
-# ---------------------------------------------------------------------
+# =========================================================
 elif page == "Correlaties":
     st.header("🔗 Correlaties — verbanden tussen temperatuur, neerslag, zon en wind")
     df, mode = selection_controls(key_prefix="corr")
@@ -717,22 +683,22 @@ elif page == "Correlaties":
     st.plotly_chart(sm, use_container_width=True)
 
 
-# ---------------------------------------------------------------------
-# PAGE 6: Voorspellingsmodel
-# ---------------------------------------------------------------------
+# =========================================================
+# PAGE 6: Voorspellingsmodel (IJmuiden uitgesloten)
+# =========================================================
 elif page == "Voorspellingsmodel":
     st.header("🧠 Voorspellingsmodel — verwachte temperatuur per station")
-    st.caption("Pas maand/dag/neerslag/windsnelheid aan. Alle stations (incl. IJmuiden) worden getoond; zonder voorspelling als grijze marker.")
+    st.caption("IJmuiden is verwijderd uit alle data. Stel maand/dag/neerslag/windsnelheid in.")
 
     found = discover_files()
     if not found:
-        st.warning("Geen JSON-data gevonden (bijv. 'Ijmuiden_2023_2024.json').")
+        st.warning("Geen JSON-data gevonden.")
         st.stop()
 
     all_periods = sorted({p for _, p, _ in found})
     sel_periods = st.multiselect("📅 Jaarperiodes", all_periods, default=all_periods, key="model_periods")
 
-    # Alle stations samenvoegen
+    # Alle stations samenvoegen (excl. IJmuiden)
     frames = []
     for station_key, period, path_str in found:
         if period not in sel_periods:
@@ -748,6 +714,10 @@ elif page == "Voorspellingsmodel":
         dfp["station"] = STATIONS_META[station_key]["name"]
         frames.append(dfp)
 
+    if not frames:
+        st.info("Geen data beschikbaar voor de gekozen filters.")
+        st.stop()
+
     df_all = pd.concat(frames, ignore_index=True)
     df_all = df_all.dropna(subset=["TG_C"]).copy()
 
@@ -757,7 +727,7 @@ elif page == "Voorspellingsmodel":
     df_all["doy_sin"] = np.sin(2 * np.pi * df_all["doy"] / 366.0)
     df_all["doy_cos"] = np.cos(2 * np.pi * df_all["doy"] / 366.0)
 
-    # Eenvoudig lineair model per station (met dynamische features)
+    # Eenvoudig lineair model per station
     def fit_linear(X, y):
         candidate_features = ["RH_mm", "FG_ms", "doy_sin", "doy_cos"]
         features = [c for c in candidate_features if c in X.columns and not X[c].isna().all()]
@@ -845,11 +815,11 @@ elif page == "Voorspellingsmodel":
 
     pred_df = pd.DataFrame(rows).replace([np.inf, -np.inf], np.nan)
 
-    # Kaart — ALTIJD alle stations tonen (incl. IJmuiden)
+    # Kaart — alleen stations die NIET uitgesloten zijn
     st.subheader("🗺️ Voorspelde temperatuur per station (°C)")
     stations_full = pd.DataFrame([
         {"station_key": k, "station": v["name"], "lat": v["lat"], "lon": v["lon"]}
-        for k, v in STATIONS_META.items()
+        for k, v in STATIONS_META.items() if k not in EXCLUDED_STATIONS
     ])
     plot_df = stations_full.merge(pred_df, on=["station_key", "station", "lat", "lon"], how="left")
 
