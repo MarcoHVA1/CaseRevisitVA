@@ -1,4 +1,3 @@
-# streamlit_dashboard.py
 import json
 from pathlib import Path
 import re
@@ -11,7 +10,9 @@ import plotly.express as px
 # === App-config ===
 st.set_page_config(page_title="Weer Dashboard NL", layout="wide")
 
-# === Data inlezen ===
+# -----------------------------------------------------------------------------
+# Helpers & Data loading
+# -----------------------------------------------------------------------------
 @st.cache_data
 def load_data(path: str):
     with open(path, "r", encoding="utf-8") as f:
@@ -24,7 +25,6 @@ def load_data(path: str):
         try:
             df["date"] = pd.to_datetime(df["date"])
         except Exception:
-            # Val terug op yyyymmdd formaten
             df["date"] = pd.to_datetime(df["date"].astype(str), format="%Y%m%d", errors="coerce")
 
     # Helper om geschaalde velden te maken
@@ -59,36 +59,6 @@ def load_data(path: str):
 
     return df
 
-# === Sidebar ===
-st.sidebar.title("Navigation")
-
-datasets = {
-    "2021–2022": "amsterdam_2021_2022.json",
-    "2022–2023": "amsterdam_2022_2023.json",
-    "2023–2024": "amsterdam_2023_2024.json",
-}
-dataset_choice = st.sidebar.selectbox("📅 Kies een dataset:", list(datasets.keys()))
-df = load_data(datasets[dataset_choice])
-
-page = st.sidebar.radio(
-    "Select a page",
-    ["Overzicht", "Temperatuur Trends", "Neerslag & Zon", "Windtrends & Topdagen", "Voorspellingsmodel"]
-)
-
-# === KPI-tegels ===
-avg_temp = df["TG_C"].mean().round(1) if "TG_C" in df else None
-total_rain = df["RH_mm"].sum().round(1) if "RH_mm" in df else None
-total_sun = df["SQ_h"].sum().round(1) if "SQ_h" in df else None
-
-kpi1, kpi2, kpi3 = st.columns(3)
-if avg_temp is not None:
-    kpi1.metric("🌡️ Gemiddelde Temp (°C)", avg_temp)
-if total_rain is not None:
-    kpi2.metric("🌧️ Totale Neerslag (mm)", total_rain)
-if total_sun is not None:
-    kpi3.metric("☀️ Totale Zonuren", total_sun)
-
-# === Stationmetadata (hergebruikt) ===
 STATIONS_META = {
     "amsterdam":  {"name": "Amsterdam",  "lat": 52.3676, "lon": 4.9041},
     "de_bilt":    {"name": "De Bilt",    "lat": 52.1010, "lon": 5.1790},
@@ -100,32 +70,145 @@ STATIONS_META = {
     "vlissingen": {"name": "Vlissingen", "lat": 51.4420, "lon": 3.5730}
 }
 
-
-# === PAGINA 1: Overzicht ===
-if page == "Overzicht":
-    st.header("🗺️ Interactieve kaart • Temperatuur, Neerslag & Zonuren")
-    st.caption("Kies jaar, maand en variabelen. De kaart toont waarden per KNMI-station; onderaan zie je de correlatie tussen twee variabelen.")
-
-    # 1) JSON-bestanden detecteren
-    files = sorted(Path(".").glob("*.json"))
-    pat = re.compile(
-        r"^(amsterdam|de_bilt|eelde|eindhoven|ijmuiden|maastricht|twente|vlissingen)_(\d{4}_\d{4})\.json$",
-        re.I
-    )
+# ---- Discover all JSON files (case-insensitive, incl. IJmuiden) ----
+@st.cache_data
+def discover_files():
+    files = sorted(Path('.').glob('*.json'))
+    pat = re.compile(r'^(amsterdam|de_bilt|eelde|eindhoven|ijmuiden|maastricht|twente|vlissingen)_(\d{4}_\d{4})\.json$', re.I)
     found = []
     for f in files:
         m = pat.match(f.name)
         if m:
             station_key, period = m.group(1).lower(), m.group(2)
             found.append((station_key, period, str(f)))
+    return found
 
+# ---- Build combined dataframe based on selection ----
+@st.cache_data
+def build_dataset(selected_periods: tuple, selected_stations: tuple):
+    found = discover_files()
+    frames = []
+    for station_key, period, path_str in found:
+        if selected_periods and period not in selected_periods:
+            continue
+        if selected_stations and station_key not in selected_stations:
+            continue
+        dfp = load_data(path_str)
+        if "date" not in dfp.columns:
+            continue
+        for c in ["TG_C", "TN_C", "TX_C", "RH_mm", "SQ_h", "FG_ms"]:
+            if c in dfp.columns:
+                dfp[c] = pd.to_numeric(dfp[c], errors="coerce")
+        dfp["station_key"] = station_key
+        dfp["station"] = STATIONS_META[station_key]["name"]
+        dfp["period"] = period
+        frames.append(dfp)
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
+
+# ---- UI block for global filters per page ----
+def selection_controls(key_prefix: str = ""):
+    found = discover_files()
+    all_periods = sorted({p for _, p, _ in found})
+    all_station_keys = [k for k in STATIONS_META.keys()]
+
+    st.subheader("⚙️ Filters")
+    col1, col2 = st.columns([2, 3])
+    with col1:
+        sel_periods = st.multiselect("📅 Jaarperiodes", options=all_periods, default=all_periods, key=f"{key_prefix}_periods")
+    with col2:
+        mode = st.selectbox(
+            "📍 Locatiekeuze",
+            ["Alle locaties (geaggregeerd)", "Enkele locatie", "Vergelijk locaties"],
+            index=0,
+            key=f"{key_prefix}_mode"
+        )
+
+    if mode == "Enkele locatie":
+        station = st.selectbox("Station", options=all_station_keys, format_func=lambda k: STATIONS_META[k]["name"], key=f"{key_prefix}_single")
+        stations = [station]
+    elif mode == "Vergelijk locaties":
+        stations = st.multiselect(
+            "Stations",
+            options=all_station_keys,
+            default=["amsterdam", "ijmuiden"],
+            format_func=lambda k: STATIONS_META[k]["name"],
+            key=f"{key_prefix}_multi"
+        )
+        if not stations:
+            st.warning("Kies minimaal één station.")
+    else:
+        stations = all_station_keys
+
+    df_all = build_dataset(tuple(sel_periods), tuple(stations))
+
+    # Aggregatie: voor "Alle locaties" middelen we per datum over stations (i.p.v. sommeren)
+    if mode == "Alle locaties (geaggregeerd)" and not df_all.empty:
+        num_cols = [c for c in ["TN_C", "TG_C", "TX_C", "RH_mm", "SQ_h", "FG_ms"] if c in df_all.columns]
+        keep_cols = ["date"] + num_cols
+        g = (df_all[keep_cols + ["station"]]
+                .groupby("date", as_index=False)
+                .agg({c: "mean" for c in num_cols}))
+        g["station"] = "Alle stations"
+        g["station_key"] = "all"
+        g["period"] = ", ".join(sel_periods)
+        df_all = g
+    return df_all, mode
+
+# -----------------------------------------------------------------------------
+# Sidebar (navigation ONLY)
+# -----------------------------------------------------------------------------
+st.sidebar.title("Navigation")
+page = st.sidebar.radio(
+    "Select a page",
+    [
+        "Overzicht",
+        "Temperatuur Trends",
+        "Neerslag & Zon",
+        "Windtrends & Topdagen",
+        "Correlaties",
+        "Voorspellingsmodel"
+    ]
+)
+
+# -----------------------------------------------------------------------------
+# KPI-tegels (op basis van alle data die aanwezig is)
+# -----------------------------------------------------------------------------
+# Gebruik alle bestanden en reken gemiddelde KPI's over alle stations
+df_kpi, _ = selection_controls.__wrapped__(key_prefix="kpi_preview")  # call undecorated to avoid UI here
+if df_kpi.empty:
+    # Fallback: hanteer lege KPIs
+    avg_temp = total_rain = total_sun = None
+else:
+    avg_temp = df_kpi.get("TG_C").mean().round(1) if "TG_C" in df_kpi else None
+    total_rain = df_kpi.get("RH_mm").sum().round(1) if "RH_mm" in df_kpi else None
+    total_sun = df_kpi.get("SQ_h").sum().round(1) if "SQ_h" in df_kpi else None
+
+kpi1, kpi2, kpi3 = st.columns(3)
+if avg_temp is not None:
+    kpi1.metric("🌡️ Gemiddelde Temp (°C)", avg_temp)
+if total_rain is not None:
+    kpi2.metric("🌧️ Totale Neerslag (mm)", total_rain)
+if total_sun is not None:
+    kpi3.metric("☀️ Totale Zonuren", total_sun)
+
+# -----------------------------------------------------------------------------
+# PAGE 1: Overzicht (ongewijzigde logica maar altijd alle JSON's + periodekeuze)
+# -----------------------------------------------------------------------------
+if page == "Overzicht":
+    st.header("🗺️ Interactieve kaart • Temperatuur, Neerslag & Zonuren")
+    st.caption("Kies jaarperiodes en variabelen. De kaart toont waarden per KNMI-station; onderaan zie je de correlatie tussen twee variabelen.")
+
+    # 1) JSON-bestanden detecteren
+    found = discover_files()
     if not found:
-        st.warning("Geen JSON-data gevonden (zoals 'Maastricht_2023_2024.json').")
+        st.warning("Geen JSON-data gevonden.")
         st.stop()
 
-    # 2) Filters
+    # 2) Filters (jaarperiodes bovenaan de pagina)
     all_periods = sorted({p for _, p, _ in found})
-    sel_periods = st.multiselect("📅 Kies jaarperiodes:", all_periods, default=all_periods)
+    sel_periods = st.multiselect("📅 Kies jaarperiodes:", all_periods, default=all_periods, key="ov_periods")
 
     month_names = [
         "Alle", "01 - Januari", "02 - Februari", "03 - Maart", "04 - April",
@@ -168,24 +251,22 @@ if page == "Overzicht":
         month_idx = month_names.index(sel_month)
         df_all = df_all[df_all["date"].dt.month == month_idx]
 
-    # 4) Numeriek maken
+    # Numeriek maken
     for c in ["TG_C", "RH_mm", "SQ_h"]:
         if c in df_all.columns:
             df_all[c] = pd.to_numeric(df_all[c], errors="coerce")
 
-    # 5) Aggregatie per station
+    # Aggregatie per station
     agg_df = (
         df_all.groupby(["station_key", "station"], as_index=False)
         .agg({map_var: agg_func, "TG_C": "mean", "RH_mm": "sum", "SQ_h": "sum"})
     )
 
-    # Coördinaten toevoegen
+    # Coördinaten
     agg_df["lat"] = agg_df["station_key"].map(lambda k: STATIONS_META[k]["lat"])
     agg_df["lon"] = agg_df["station_key"].map(lambda k: STATIONS_META[k]["lon"])
 
-    # 6) Data schoonmaken voor de kaart
-    agg_df = agg_df.replace([np.inf, -np.inf], np.nan)
-    agg_df = agg_df.dropna(subset=["lat", "lon", map_var])
+    agg_df = agg_df.replace([np.inf, -np.inf], np.nan).dropna(subset=["lat", "lon", map_var])
 
     if agg_df.empty:
         st.info("Geen geldige waarden om op de kaart te tonen voor de gekozen filters.")
@@ -193,7 +274,6 @@ if page == "Overzicht":
         color_scale = "RdYlBu_r" if map_var == "TG_C" else ("Blues" if map_var == "RH_mm" else "YlOrBr")
         map_title = {"TG_C": "Temperatuur (°C)", "RH_mm": "Neerslag (mm)", "SQ_h": "Zonuren (h)"}[map_var]
 
-        # Alleen size gebruiken als alle waarden niet-negatief zijn
         size_kwargs = {}
         if (agg_df[map_var] >= 0).all():
             size_kwargs = {"size": map_var, "size_max": 28}
@@ -217,141 +297,179 @@ if page == "Overzicht":
         )
         st.plotly_chart(fig_map, use_container_width=True)
 
-# === PAGINA 2: Temperatuur Trends ===
+# -----------------------------------------------------------------------------
+# PAGE 2: Temperatuur Trends (+ heatmap toegevoegd + locatie/vergelijk/alle + periode)
+# -----------------------------------------------------------------------------
 elif page == "Temperatuur Trends":
     st.header("🌡️ Temperatuur Trends")
-    use_cols = [c for c in ["TN_C", "TG_C", "TX_C"] if c in df.columns]
+    df, mode = selection_controls(key_prefix="temp")
+    if df.empty or "date" not in df.columns:
+        st.info("Geen data beschikbaar voor de gekozen filters.")
+        st.stop()
 
+    # Lijnplot min/gem/max (per station of geaggregeerd)
+    use_cols = [c for c in ["TN_C", "TG_C", "TX_C"] if c in df.columns]
     if use_cols:
         label_map = {"TN_C": "Min temp", "TG_C": "Gem temp", "TX_C": "Max temp"}
-        temp = df[["date"] + use_cols].melt("date", var_name="type", value_name="temp_C")
+        if "station" not in df.columns:
+            df["station"] = "Alle stations"
+        temp = df[["date", "station"] + use_cols].melt(["date", "station"], var_name="type", value_name="temp_C")
         temp["type"] = temp["type"].replace(label_map)
 
+        facet_args = {}
+        if mode == "Vergelijk locaties":
+            facet_args = {"facet_row": "station"}
+
         fig = px.line(
-            temp, x="date", y="temp_C", color="type",
-            title="Dagelijkse temperatuur (min, gem, max)",
+            temp, x="date", y="temp_C", color="type", **facet_args,
             labels={"temp_C": "Temperatuur (°C)", "date": "Datum", "type": "Type"},
+            title="Dagelijkse temperatuur (min, gem, max)"
         )
         st.plotly_chart(fig, use_container_width=True)
 
-        # Boxplot temperatuur per maand
-        df["month_name"] = df["date"].dt.month_name()
+    # Boxplot temperatuur per maand
+    dft = df.copy()
+    dft["month_name"] = dft["date"].dt.month_name()
+    fig_box = px.box(
+        dft, x="month_name", y="TG_C", color=("station" if mode == "Vergelijk locaties" else None),
+        category_orders={"month_name": [
+            "January", "February", "March", "April", "May", "June",
+            "July", "August", "September", "October", "November", "December"
+        ]},
+        title="📦 Verdeling van gemiddelde temperatuur per maand",
+        labels={"month_name": "Maand", "TG_C": "Gemiddelde temperatuur (°C)"}
+    )
+    fig_box.update_traces(line_width=2)
+    st.plotly_chart(fig_box, use_container_width=True)
 
-        fig_box = px.box(
-            df, x="month_name", y="TG_C",
-            category_orders={"month_name": [
-                "January", "February", "March", "April", "May", "June",
-                "July", "August", "September", "October", "November", "December"
-            ]},
-            title="📦 Verdeling van gemiddelde temperatuur per maand",
-            labels={"month_name": "Maand", "TG_C": "Gemiddelde temperatuur (°C)"},
-            color="month_name"
-        )
-        fig_box.update_traces(line_width=2)
-        st.plotly_chart(fig_box, use_container_width=True)
-
-        # Gemiddelde temperatuur per seizoen
-        season_temp = df.groupby("season")["TG_C"].mean().reset_index()
-        season_colors = {"winter": "#3498db", "lente": "#2ecc71", "zomer": "#f1c40f", "herfst": "#e67e22"}
-
+    # Gemiddelde temperatuur per seizoen
+    season_temp = df.groupby([("station" if mode == "Vergelijk locaties" else None), "season"].
+                             dropna()).TG_C.mean().reset_index()
+    if mode != "Vergelijk locaties":
+        season_temp.rename(columns={"TG_C": "Gem_TG_C"}, inplace=True)
         fig_season = px.bar(
-            season_temp, x="season", y="TG_C", color="season",
+            season_temp, x="season", y="Gem_TG_C", color="season",
             title="🌦️ Gemiddelde temperatuur per seizoen",
-            labels={"season": "Seizoen", "TG_C": "Gemiddelde Temp (°C)"},
-            color_discrete_map=season_colors
+            labels={"season": "Seizoen", "Gem_TG_C": "Gemiddelde Temp (°C)"}
         )
-        st.plotly_chart(fig_season, use_container_width=True)
-
-# === PAGINA 3: Neerslag & Zon ===
-elif page == "Neerslag & Zon":
-    st.header("☔ Neerslag vs. Zon")
-
-    if "RH_mm" in df.columns and "SQ_h" in df.columns:
-        bins = [0, 1, 5, 10, 50]
-        labels = ["0 mm", "0–5 mm", "5–10 mm", "10+ mm"]
-        df["rain_cat"] = pd.cut(df["RH_mm"], bins=bins, labels=labels, include_lowest=True)
-
-        ordered_cats = ["0 mm", "0–5 mm", "5–10 mm", "10+ mm"]
-        df["rain_cat"] = pd.Categorical(df["rain_cat"], categories=ordered_cats, ordered=True)
-
-        color_map = {
-            "0 mm": "#d7263d",
-            "0–5 mm": "#0e6eb8",
-            "5–10 mm": "#74a9cf",
-            "10+ mm": "#eab0b6"
-        }
-
-        fig_box = px.box(
-            df, x="rain_cat", y="SQ_h",
-            color="rain_cat",
-            category_orders={"rain_cat": ordered_cats},
-            color_discrete_map=color_map,
-            title="📦 Verdeling zonuren per neerslagcategorie",
-            labels={"SQ_h": "Zonuren", "rain_cat": "Neerslagcategorie"},
-            points="all"
+    else:
+        season_temp.rename(columns={"TG_C": "Gem_TG_C"}, inplace=True)
+        fig_season = px.bar(
+            season_temp, x="season", y="Gem_TG_C", color="station", barmode="group",
+            title="🌦️ Gemiddelde temperatuur per seizoen (per station)",
+            labels={"season": "Seizoen", "Gem_TG_C": "Gemiddelde Temp (°C)", "station": "Station"}
         )
-        st.plotly_chart(fig_box, use_container_width=True)
+    st.plotly_chart(fig_season, use_container_width=True)
 
-        rain_bins = pd.cut(
-            df["RH_mm"], bins=[0, 1, 5, 10, 20, 50],
-            include_lowest=True,
-            labels=["0–1 mm", "1–5 mm", "5–10 mm", "10–20 mm", "20+ mm"]
-        )
-        avg_temp_rain = df.groupby(rain_bins)["TG_C"].mean().reset_index()
-
-        fig_temp_rain = px.bar(
-            avg_temp_rain, x="RH_mm", y="TG_C",
-            title="🌧️ Gemiddelde temperatuur bij toenemende regenval",
-            labels={"RH_mm": "Neerslagcategorie (mm per dag)", "TG_C": "Gemiddelde temperatuur (°C)"},
-            text_auto=".1f",
-            color="TG_C",
-            color_continuous_scale="RdYlBu_r"
-        )
-        fig_temp_rain.update_layout(
-            xaxis_title="Neerslagcategorie (mm per dag)",
-            yaxis_title="Gemiddelde temperatuur (°C)",
-            showlegend=False
-        )
-        st.plotly_chart(fig_temp_rain, use_container_width=True)
-
-# === PAGINA 4: Windtrends & Topdagen ===
-elif page == "Windtrends & Topdagen":
-    st.header("📊 Windtrends & Topdagen")
-
-    # 1. Kalender-heatmap temperatuur
-    if "TG_C" in df.columns and "date" in df.columns:
-        df["day"] = df["date"].dt.day
-        pivot = df.pivot_table(index="month", columns="day", values="TG_C", aggfunc="mean")
+    # 📅 Kalender-heatmap (verplaatst vanuit Windtrends & Topdagen)
+    st.subheader("📅 Kalender-heatmap: gemiddelde temperatuur per dag")
+    # Voor vergelijken tonen we tabs per station
+    if mode == "Vergelijk locaties":
+        tabs = st.tabs(sorted(df["station"].unique()))
+        for tab, st_name in zip(tabs, sorted(df["station"].unique())):
+            with tab:
+                d = df[df["station"] == st_name].copy()
+                d["day"] = d["date"].dt.day
+                d["month"] = d["date"].dt.month
+                pivot = d.pivot_table(index="month", columns="day", values="TG_C", aggfunc="mean")
+                month_names_map = {
+                    1: "Januari", 2: "Februari", 3: "Maart", 4: "April",
+                    5: "Mei", 6: "Juni", 7: "Juli", 8: "Augustus",
+                    9: "September", 10: "Oktober", 11: "November", 12: "December"
+                }
+                pivot.index = pivot.index.map(month_names_map)
+                fig_heatmap = px.imshow(
+                    pivot, color_continuous_scale="RdBu_r", origin="upper", aspect="auto",
+                    labels=dict(color="Temperatuur (°C)", x="Dag van de maand", y="Maand")
+                )
+                fig_heatmap.update_xaxes(title="Dag van de maand", tickmode="linear")
+                fig_heatmap.update_yaxes(title="Maand", tickmode="array",
+                                         tickvals=list(pivot.index), ticktext=list(pivot.index))
+                st.plotly_chart(fig_heatmap, use_container_width=True)
+    else:
+        d = df.copy()
+        d["day"] = d["date"].dt.day
+        d["month"] = d["date"].dt.month
+        pivot = d.pivot_table(index="month", columns="day", values="TG_C", aggfunc="mean")
         month_names_map = {
             1: "Januari", 2: "Februari", 3: "Maart", 4: "April",
             5: "Mei", 6: "Juni", 7: "Juli", 8: "Augustus",
             9: "September", 10: "Oktober", 11: "November", 12: "December"
         }
         pivot.index = pivot.index.map(month_names_map)
-
         fig_heatmap = px.imshow(
-            pivot,
-            color_continuous_scale="RdBu_r",
-            origin="upper",
-            aspect="auto",
+            pivot, color_continuous_scale="RdBu_r", origin="upper", aspect="auto",
             labels=dict(color="Temperatuur (°C)", x="Dag van de maand", y="Maand")
         )
         fig_heatmap.update_xaxes(title="Dag van de maand", tickmode="linear")
         fig_heatmap.update_yaxes(title="Maand", tickmode="array",
                                  tickvals=list(pivot.index), ticktext=list(pivot.index))
-        fig_heatmap.update_layout(title="📅 Kalender-heatmap: gemiddelde temperatuur per dag", title_x=0.5)
-
         st.plotly_chart(fig_heatmap, use_container_width=True)
 
-     # 2. Windroos — Interactief (Plotly, robuuste binning)
+# -----------------------------------------------------------------------------
+# PAGE 3: Neerslag & Zon (met locatie/vergelijk/alle + periode)
+# -----------------------------------------------------------------------------
+elif page == "Neerslag & Zon":
+    st.header("☔ Neerslag vs. Zon")
+    df, mode = selection_controls(key_prefix="rain_sun")
+    if df.empty:
+        st.info("Geen data beschikbaar voor de gekozen filters.")
+        st.stop()
+
+    if "RH_mm" in df.columns and "SQ_h" in df.columns:
+        bins = [0, 1, 5, 10, 50]
+        labels = ["0 mm", "0–5 mm", "5–10 mm", "10+ mm"]
+        df["rain_cat"] = pd.cut(df["RH_mm"], bins=bins, labels=labels, include_lowest=True)
+        ordered_cats = ["0 mm", "0–5 mm", "5–10 mm", "10+ mm"]
+        df["rain_cat"] = pd.Categorical(df["rain_cat"], categories=ordered_cats, ordered=True)
+
+        fig_box = px.box(
+            df, x="rain_cat", y="SQ_h",
+            color=("station" if mode == "Vergelijk locaties" else "rain_cat"),
+            category_orders={"rain_cat": ordered_cats},
+            title="📦 Verdeling zonuren per neerslagcategorie",
+            labels={"SQ_h": "Zonuren", "rain_cat": "Neerslagcategorie"},
+            points="all"
+        )
+        st.plotly_chart(fig_box, use_container_width=True)
+
+        # Gemiddelde temperatuur bij toenemende regenval
+        rain_bins = pd.cut(
+            df["RH_mm"], bins=[0, 1, 5, 10, 20, 50], include_lowest=True,
+            labels=["0–1 mm", "1–5 mm", "5–10 mm", "10–20 mm", "20+ mm"]
+        )
+        avg_temp_rain = df.groupby([rain_bins] + (["station"] if mode == "Vergelijk locaties" else []) )["TG_C"].mean().reset_index()
+        avg_temp_rain.rename(columns={"RH_mm": "Neerslag"}, inplace=True)
+
+        fig_temp_rain = px.bar(
+            avg_temp_rain, x="RH_mm", y="TG_C",
+            color=("station" if mode == "Vergelijk locaties" else None),
+            barmode=("group" if mode == "Vergelijk locaties" else "relative"),
+            title="🌧️ Gemiddelde temperatuur bij toenemende regenval",
+            labels={"RH_mm": "Neerslagcategorie (mm per dag)", "TG_C": "Gemiddelde temperatuur (°C)", "station": "Station"},
+            text_auto=".1f",
+            color_continuous_scale="RdYlBu_r"
+        )
+        fig_temp_rain.update_layout(showlegend=True)
+        st.plotly_chart(fig_temp_rain, use_container_width=True)
+
+# -----------------------------------------------------------------------------
+# PAGE 4: Windtrends & Topdagen (met locatie/vergelijk/alle + periode)
+# -----------------------------------------------------------------------------
+elif page == "Windtrends & Topdagen":
+    st.header("📊 Windtrends & Topdagen")
+    df, mode = selection_controls(key_prefix="wind")
+    if df.empty:
+        st.info("Geen data beschikbaar voor de gekozen filters.")
+        st.stop()
+
+    # 🧭 Interactieve windroos
     if "FG_ms" in df.columns and "DDVEC" in df.columns:
         st.subheader("🧭 Interactieve windroos")
-
-        w = df[["DDVEC", "FG_ms"]].dropna().copy()
+        w = df[["station", "DDVEC", "FG_ms"]].dropna().copy()
         w["DDVEC"] = pd.to_numeric(w["DDVEC"], errors="coerce") % 360
         w["FG_ms"] = pd.to_numeric(w["FG_ms"], errors="coerce")
         w = w.dropna()
-
         if w.empty:
             st.info("Geen geldige winddata om te tonen.")
         else:
@@ -380,9 +498,9 @@ elif page == "Windtrends & Topdagen":
             w["speed_bin"] = pd.cut(w["FG_ms"], bins=speed_bins, labels=speed_labels, include_lowest=True, right=False)
 
             agg = (
-                w.dropna(subset=["dir_bin", "speed_bin"])
-                 .groupby(["dir_bin_idx", "dir_bin", "speed_bin"], as_index=False)
-                 .size()
+                w.dropna(subset=["dir_bin", "speed_bin"]) \
+                 .groupby(["station", "dir_bin_idx", "dir_bin", "speed_bin"], as_index=False) \
+                 .size() \
                  .rename(columns={"size": "count"})
             )
 
@@ -390,18 +508,18 @@ elif page == "Windtrends & Topdagen":
                 st.info("Geen data binnen de gekozen bins.")
             else:
                 if normalize == "% van totaal":
-                    total = agg["count"].sum()
+                    total = agg.groupby("station")["count"].transform("sum")
                     agg["value"] = np.where(total > 0, 100.0 * agg["count"] / total, 0.0)
                     r_title, tick_suffix = "Frequentie (%)", "%"
                 elif normalize == "% per richting":
-                    dir_tot = agg.groupby("dir_bin_idx")["count"].transform("sum")
+                    dir_tot = agg.groupby(["station", "dir_bin_idx"])["count"].transform("sum")
                     agg["value"] = np.where(dir_tot > 0, 100.0 * agg["count"] / dir_tot, 0.0)
                     r_title, tick_suffix = "Aandeel binnen richting (%)", "%"
                 else:
                     agg["value"] = agg["count"]
                     r_title, tick_suffix = "Aantal", ""
 
-                agg = agg.sort_values("dir_bin_idx")
+                agg = agg.sort_values(["station", "dir_bin_idx"]).reset_index(drop=True)
 
                 fig_windrose = px.bar_polar(
                     agg,
@@ -409,6 +527,7 @@ elif page == "Windtrends & Topdagen":
                     theta="dir_bin",
                     color="speed_bin",
                     barmode="stack",
+                    facet_row=("station" if mode == "Vergelijk locaties" else None),
                     hover_data={"count": True, "value": True, "dir_bin_idx": False}
                 )
                 fig_windrose.update_layout(
@@ -421,10 +540,9 @@ elif page == "Windtrends & Topdagen":
                 )
                 st.plotly_chart(fig_windrose, use_container_width=True)
 
-    # 3. Boxplot windsnelheid per seizoen
+    # Boxplot windsnelheid per seizoen
     if "FG_ms" in df.columns and "date" in df.columns:
         st.subheader("📦 Verdeling van windsnelheid per seizoen")
-
         def get_season(date):
             m = date.month
             if m in [3, 4, 5]:
@@ -435,24 +553,14 @@ elif page == "Windtrends & Topdagen":
                 return "Herfst"
             else:
                 return "Winter"
-
         df["season_box"] = df["date"].apply(get_season)
-
         season_order = ["Lente", "Zomer", "Herfst", "Winter"]
-        season_colors = {
-            "Lente": "#2ecc71",
-            "Zomer": "#f1c40f",
-            "Herfst": "#e67e22",
-            "Winter": "#3498db"
-        }
-
         fig_box = px.box(
             df,
             x="season_box",
             y="FG_ms",
-            color="season_box",
+            color=("station" if mode == "Vergelijk locaties" else "season_box"),
             category_orders={"season_box": season_order},
-            color_discrete_map=season_colors,
             points="all"
         )
         fig_box.update_traces(line_width=3)
@@ -463,35 +571,68 @@ elif page == "Windtrends & Topdagen":
             title_x=0.5,
             boxmode="group"
         )
-
         st.plotly_chart(fig_box, use_container_width=True)
 
-# == Pagina 5 == 
+# -----------------------------------------------------------------------------
+# PAGE 5: Correlaties (NIEUW)
+# -----------------------------------------------------------------------------
+elif page == "Correlaties":
+    st.header("🔗 Correlaties tussen variabelen")
+    df, mode = selection_controls(key_prefix="corr")
+    if df.empty:
+        st.info("Geen data beschikbaar voor de gekozen filters.")
+        st.stop()
+
+    vars_use = [c for c in ["TN_C", "TG_C", "TX_C", "RH_mm", "SQ_h", "FG_ms"] if c in df.columns]
+    if not vars_use:
+        st.info("Geen geschikte variabelen gevonden voor correlatie.")
+        st.stop()
+
+    # Correlatiematrix (Pearson)
+    st.subheader("📐 Correlatiematrix (Pearson)")
+    if mode == "Vergelijk locaties":
+        tabs = st.tabs(sorted(df["station"].unique()))
+        for tab, st_name in zip(tabs, sorted(df["station"].unique())):
+            with tab:
+                cdf = df[df["station"] == st_name][vars_use]
+                corr = cdf.corr().round(2)
+                fig = px.imshow(corr, text_auto=True, aspect="auto", origin="upper")
+                st.plotly_chart(fig, use_container_width=True)
+    else:
+        corr = df[vars_use].corr().round(2)
+        fig = px.imshow(corr, text_auto=True, aspect="auto", origin="upper")
+        st.plotly_chart(fig, use_container_width=True)
+
+    # Scatter-matrix
+    st.subheader("📊 Scatter matrix")
+    sm = px.scatter_matrix(df, dimensions=vars_use, color=("station" if mode == "Vergelijk locaties" else None), height=700)
+    st.plotly_chart(sm, use_container_width=True)
+
+# -----------------------------------------------------------------------------
+# PAGE 6: Voorspellingsmodel (inclusief IJmuiden)
+# -----------------------------------------------------------------------------
 elif page == "Voorspellingsmodel":
     st.header("🧠 Voorspellingsmodel — voorspelde temperatuur in Nederland")
-    st.caption("Pas **maand**, **dag**, **neerslag** en **windsnelheid** aan. Het model voorspelt de **temperatuur (°C)** per station op basis van historische patronen.")
+    st.caption("Pas **maand**, **dag**, **neerslag** en **windsnelheid** aan. Het model voorspelt de **temperatuur (°C)** per station op basis van historische patronen. Alle stations incl. IJmuiden worden automatisch meegenomen.")
 
     # === Alle JSON-bestanden automatisch inlezen ===
-    files = sorted(Path(".").glob("*.json"))
-    pat = re.compile(r"^(amsterdam|de_bilt|eelde|eindhoven|ijmuiden|maastricht|twente|vlissingen)_(\d{4}_\d{4})\.json$", re.I)
-    found = []
-    for f in files:
-        m = pat.match(f.name)
-        if m:
-            station_key, period = m.group(1).lower(), m.group(2)
-            found.append((station_key, period, str(f)))
-
+    found = discover_files()
     if not found:
-        st.warning("Geen JSON-data gevonden (bijv. 'amsterdam_2023_2024.json').")
+        st.warning("Geen JSON-data gevonden (bijv. 'ijmuiden_2023_2024.json').")
         st.stop()
+
+    # Periodekeuze bovenaan
+    all_periods = sorted({p for _, p, _ in found})
+    sel_periods = st.multiselect("📅 Kies jaarperiodes:", all_periods, default=all_periods, key="model_periods")
 
     # === Alle stations samenvoegen ===
     frames = []
-    for station_key, _, path_str in found:
+    for station_key, period, path_str in found:
+        if period not in sel_periods:
+            continue
         dfp = load_data(path_str)
         if "date" not in dfp.columns:
             continue
-        # Benodigde kolommen afdwingen + numeriek maken
         for c in ["TG_C", "RH_mm", "FG_ms"]:
             if c not in dfp.columns:
                 dfp[c] = np.nan
@@ -535,11 +676,10 @@ elif page == "Voorspellingsmodel":
         st.info("Onvoldoende data om een stationmodel te trainen.")
         st.stop()
 
-       # === Gebruikersinvoer ===
+    # === Gebruikersinvoer ===
     import calendar
     st.subheader("⚙️ Stel je omstandigheden in")
     col1, col2, col3 = st.columns(3)
-
     with col1:
         maand = st.slider("📆 Maand", 1, 12, 7)
         max_dag = calendar.monthrange(2024, maand)[1]
@@ -578,10 +718,8 @@ elif page == "Voorspellingsmodel":
     pred_df = pd.DataFrame(rows).replace([np.inf, -np.inf], np.nan)
 
     # === Kaart (ZWART-WIT) met voorspelde temperatuur ===
-       # === Kaart (ZWART-WIT) met voorspelde temperatuur ===
     st.subheader("🗺️ Voorspelde temperatuur per station (°C)")
     plot_df = pred_df.dropna(subset=["lat", "lon", "pred_TG_C"]).copy()
-
     if plot_df.empty:
         st.info("Geen geldige stations om te tonen.")
     else:
@@ -593,7 +731,6 @@ elif page == "Voorspellingsmodel":
             plot_df["size"] = 0.5
         plot_df["size"] = (plot_df["size"] * 25) + 6
 
-        # ✅ Vaste legenda voor temperatuur (°C)
         TEMP_SCALE_MIN = -5.0
         TEMP_SCALE_MAX = 30.0
 
@@ -603,8 +740,8 @@ elif page == "Voorspellingsmodel":
             lon="lon",
             color="pred_TG_C",
             size="size",
-            color_continuous_scale="RdYlBu_r",   # of "Turbo" voor meer contrast
-            range_color=[TEMP_SCALE_MIN, TEMP_SCALE_MAX],  # vaste schaal
+            color_continuous_scale="RdYlBu_r",
+            range_color=[TEMP_SCALE_MIN, TEMP_SCALE_MAX],
             zoom=6,
             hover_name="station",
             hover_data={
@@ -618,9 +755,8 @@ elif page == "Voorspellingsmodel":
             },
             height=520
         )
-
         fig.update_layout(
-            mapbox_style="carto-darkmatter",  # 🇳🇱 zwart/donker Nederland
+            mapbox_style="carto-darkmatter",
             margin=dict(l=0, r=0, t=10, b=0),
             coloraxis_colorbar=dict(
                 title="Voorspelde temperatuur",
@@ -628,17 +764,13 @@ elif page == "Voorspellingsmodel":
                 tickmode="auto"
             )
         )
-
         st.plotly_chart(fig, use_container_width=True)
 
-        # === Tabel: voorspelde temperatuur (°C), afgerond op 1 decimaal ===
+        # === Tabel: voorspelde temperatuur (°C) ===
         st.subheader("📄 Tabel: voorspelde temperatuur (°C)")
         temp_tbl = (
             pred_df[["station", "pred_TG_C"]]
-            .rename(columns={
-                "station": "Station",
-                "pred_TG_C": "Voorspelde Temp (°C)"
-            })
+            .rename(columns={"station": "Station", "pred_TG_C": "Voorspelde Temp (°C)"})
             .assign(**{"Voorspelde Temp (°C)": lambda d: d["Voorspelde Temp (°C)"].round(1)})
             .sort_values("Voorspelde Temp (°C)", ascending=False)
             .reset_index(drop=True)
@@ -647,15 +779,12 @@ elif page == "Voorspellingsmodel":
 
         # === Samenvatting over alle stations ===
         st.subheader("📈 Gemiddelde modelprestatie in Nederland")
-
         avg_temp = pred_df["pred_TG_C"].mean()
         avg_r2 = pred_df["r2"].mean()
         avg_rmse = pred_df["rmse"].mean()
-
         summary_df = pd.DataFrame([{
             "Gem. voorspelde temperatuur (°C)": round(avg_temp, 1),
             "Gem. R² (verklaarde variantie)": round(avg_r2, 2),
             "Gem. standaardafwijking (°C)": round(avg_rmse, 1)
         }])
-
         st.table(summary_df)
