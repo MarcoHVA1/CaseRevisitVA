@@ -571,7 +571,7 @@ elif page == "Voorspellingsmodel":
         dfp = load_data(path)
         if dfp.empty or "date" not in dfp.columns:
             continue
-        for c in ["TG_C", "RH_mm", "FG_ms"]:
+        for c in ["TG_C", "RH_mm", "FG_ms", "SQ_h"]:
             if c not in dfp.columns:
                 dfp[c] = np.nan
             dfp[c] = pd.to_numeric(dfp[c], errors="coerce")
@@ -588,7 +588,7 @@ elif page == "Voorspellingsmodel":
     df_all["doy_cos"] = np.cos(2 * np.pi * df_all["doy"] / 366.0)
 
     def fit_linear(X, y):
-        feats = [c for c in ["RH_mm", "FG_ms", "doy_sin", "doy_cos"] if c in X.columns]
+        feats = [c for c in ["RH_mm", "FG_ms", "SQ_h", "doy_sin", "doy_cos"] if c in X.columns]
         if "doy_sin" not in feats: feats.append("doy_sin")
         if "doy_cos" not in feats: feats.append("doy_cos")
         X_ = np.column_stack([np.ones(len(X))] + [X[c].values for c in feats])
@@ -607,23 +607,40 @@ elif page == "Voorspellingsmodel":
 
     models = {}
     for sk, g in df_all.groupby("station_key"):
-        m = fit_linear(g[["RH_mm", "FG_ms", "doy_sin", "doy_cos"]], g["TG_C"])
-        if m: models[sk] = m
+        m = fit_linear(g[["RH_mm", "FG_ms", "SQ_h", "doy_sin", "doy_cos"]], g["TG_C"])
+        if m:
+            models[sk] = m
+
     if not models:
         st.info("Onvoldoende data om modellen te trainen.")
         st.stop()
 
     import calendar
     st.subheader("⚙️ Stel de omstandigheden in")
-    c1, c2, c3 = st.columns(3)
+
+    # Maand, regen, wind, zon
+    c1, c2, c3, c4 = st.columns(4)
     with c1:
         maand = st.slider("📆 Maand", 1, 12, 7)
         max_dag = calendar.monthrange(2024, maand)[1]
         dag = st.slider("📅 Dag", 1, int(max_dag), min(15, max_dag))
+
+    # Realistische standaardwaardes afhankelijk van maand
+    if maand in [12, 1, 2]:
+        default_sun = 2.0   # winter
+    elif maand in [3, 4, 5]:
+        default_sun = 5.0   # lente
+    elif maand in [6, 7, 8]:
+        default_sun = 8.0   # zomer
+    else:
+        default_sun = 4.0   # herfst
+
     with c2:
-        pred_rain = st.slider("🌧️ Neerslag (mm/dag)", 0.0, 50.0, 0.0, 0.5)
+        pred_rain = st.slider("🌧️ Neerslag (mm/dag)", 0.0, 50.0, 2.0, 0.5)
     with c3:
         pred_wind = st.slider("💨 Windsnelheid (m/s)", 0.0, 15.0, 3.0, 0.5)
+    with c4:
+        pred_sun = st.slider("☀️ Zonuren (uur/dag)", 0.0, 12.0, default_sun, 0.25)
 
     try:
         selected_date = pd.Timestamp(year=2024, month=int(maand), day=int(dag))
@@ -635,32 +652,46 @@ elif page == "Voorspellingsmodel":
 
     rows = []
     for sk, m in models.items():
-        # features volgorde: ["const", ...]
         vals = [1.0]
         for f in m["features"][1:]:
-            if f == "RH_mm": vals.append(pred_rain)
-            elif f == "FG_ms": vals.append(pred_wind)
-            elif f == "doy_sin": vals.append(sin)
-            elif f == "doy_cos": vals.append(cos)
-            else: vals.append(0.0)
+            if f == "RH_mm":
+                vals.append(pred_rain)
+            elif f == "FG_ms":
+                vals.append(pred_wind)
+            elif f == "SQ_h":
+                vals.append(pred_sun)
+            elif f == "doy_sin":
+                vals.append(sin)
+            elif f == "doy_cos":
+                vals.append(cos)
+            else:
+                vals.append(0.0)
         pred = float(np.array(vals) @ m["beta"])
         rows.append({
-            "station_key": sk, "station": STATIONS_META[sk]["name"],
-            "lat": STATIONS_META[sk]["lat"], "lon": STATIONS_META[sk]["lon"],
-            "pred_TG_C": pred, "r2": m["r2"], "rmse": m["rmse"], "n": m["n"]
+            "station_key": sk,
+            "station": STATIONS_META[sk]["name"],
+            "lat": STATIONS_META[sk]["lat"],
+            "lon": STATIONS_META[sk]["lon"],
+            "pred_TG_C": pred,
+            "r2": m["r2"],
+            "rmse": m["rmse"],
+            "n": m["n"]
         })
     pred_df = pd.DataFrame(rows)
 
     # Kaart
     st.subheader("🗺️ Voorspelde temperatuur per station (°C)")
-    all_points = pd.DataFrame([{"station_key": k, "station": v["name"], "lat": v["lat"], "lon": v["lon"]} for k, v in STATIONS_META.items()])
-    plot_df = all_points.merge(pred_df, on=["station_key","station","lat","lon"], how="left")
+    all_points = pd.DataFrame([
+        {"station_key": k, "station": v["name"], "lat": v["lat"], "lon": v["lon"]}
+        for k, v in STATIONS_META.items() if k not in EXCLUDED_STATIONS
+    ])
+    plot_df = all_points.merge(pred_df, on=["station_key", "station", "lat", "lon"], how="left")
 
     valid = plot_df.dropna(subset=["pred_TG_C"]).copy()
     missing = plot_df[plot_df["pred_TG_C"].isna()].copy()
     if not valid.empty:
         rng = valid["pred_TG_C"].max() - valid["pred_TG_C"].min()
-        valid["size"] = 0.5 if rng == 0 else (valid["pred_TG_C"] - valid["pred_TG_C"].min())/rng
+        valid["size"] = 0.5 if rng == 0 else (valid["pred_TG_C"] - valid["pred_TG_C"].min()) / rng
         valid["size"] = (valid["size"] * 25) + 6
 
     fig = px.scatter_mapbox(
@@ -672,7 +703,8 @@ elif page == "Voorspellingsmodel":
         range_color=([-5.0, 30.0] if not valid.empty else None),
         zoom=6, height=520,
         hover_name="station",
-        hover_data={"pred_TG_C": True, "r2": True, "rmse": True, "n": True, "lat": False, "lon": False, "size": False},
+        hover_data={"pred_TG_C": True, "r2": True, "rmse": True, "n": True,
+                    "lat": False, "lon": False, "size": False},
     )
     if not missing.empty:
         fig.add_trace(go.Scattermapbox(
@@ -680,15 +712,20 @@ elif page == "Voorspellingsmodel":
             marker=dict(size=14, color="#A0A0A0"), name="Geen voorspelling",
             text=missing["station"], hoverinfo="text"
         ))
-    fig.update_layout(mapbox_style="carto-darkmatter", margin=dict(l=0, r=0, t=10, b=0),
-                      coloraxis_colorbar=dict(title="Voorspelde temperatuur", ticksuffix="°C"))
+    fig.update_layout(
+        mapbox_style="carto-darkmatter",
+        margin=dict(l=0, r=0, t=10, b=0),
+        coloraxis_colorbar=dict(title="Voorspelde temperatuur", ticksuffix="°C")
+    )
     st.plotly_chart(fig, use_container_width=True)
 
     st.subheader("📄 Tabel — voorspelde temperatuur (°C)")
     st.dataframe(
-        pred_df[["station","pred_TG_C"]]
-        .rename(columns={"station":"Station","pred_TG_C":"Voorspelde temperatuur (°C)"})
+        pred_df[["station", "pred_TG_C"]]
+        .rename(columns={"station": "Station", "pred_TG_C": "Voorspelde temperatuur (°C)"})
         .assign(**{"Voorspelde temperatuur (°C)": lambda d: d["Voorspelde temperatuur (°C)"].round(1)})
-        .sort_values("Voorspelde temperatuur (°C)", ascending=False).reset_index(drop=True),
+        .sort_values("Voorspelde temperatuur (°C)", ascending=False)
+        .reset_index(drop=True),
         use_container_width=True
     )
+
