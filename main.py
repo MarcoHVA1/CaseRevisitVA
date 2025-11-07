@@ -539,7 +539,7 @@ elif page == "Correlaties":
         st.stop()
 
     # Heatmap met hernoemde labels
-    st.subheader("📐 Correlatiematrix (Pearson)")
+    st.subheader("📐 Correlatiematrix")
     if mode == "Vergelijk locaties":
         tabs = st.tabs(sorted(df["station"].unique()))
         for tab, st_name in zip(tabs, sorted(df["station"].unique())):
