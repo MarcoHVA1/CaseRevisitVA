@@ -518,7 +518,7 @@ elif page == "Windtrends & Topdagen":
         st.plotly_chart(fig_wb, use_container_width=True)
 
 elif page == "Correlaties":
-    st.header("🔗 Correlaties — makkelijk leesbaar (mensentaal)")
+    st.header("🔗 Correlaties ")
     df, mode, _, _ = selection_controls(key_prefix="corr")
     if df.empty:
         st.info("Geen data beschikbaar voor de gekozen filters.")
