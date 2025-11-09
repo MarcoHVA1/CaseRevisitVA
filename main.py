@@ -64,7 +64,7 @@ def load_data(path: str) -> pd.DataFrame:
 
     return df
 
-# Stations die we willen uitsluiten
+# Stations 
 EXCLUDED_STATIONS = {"ijmuiden"}
 
 STATIONS_META = {
@@ -291,8 +291,6 @@ page = st.sidebar.radio(
     "Ga naar",
     ["Overzicht", "Temperatuur Trends", "Neerslag & Zon", "Windtrends & Topdagen", "Correlaties", "Voorspellingsmodel"],
 )
-
-# =========================================================
 
 
 
@@ -538,7 +536,7 @@ elif page == "Correlaties":
         st.info("Geen geschikte variabelen gevonden voor correlatie.")
         st.stop()
 
-    # Heatmap met hernoemde labels
+    # Correlatiematrix
     st.subheader("📐 Correlatiematrix")
     if mode == "Vergelijk locaties":
         tabs = st.tabs(sorted(df["station"].unique()))
